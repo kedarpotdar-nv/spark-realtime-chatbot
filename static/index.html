@@ -1,0 +1,5738 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SparkVoice</title>
+  <!-- Marked.js for markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- Mermaid.js for diagram rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+  <!-- VAD (Voice Activity Detection) for voice call mode -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.7/dist/bundle.min.js"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      margin: 0;
+      padding: 0;
+      background: #f5f5f5;
+      color: #333;
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Main container with sidebar */
+    .main-container {
+      display: flex;
+      flex: 1;
+      overflow: hidden;
+    }
+
+    /* Left sidebar for chat history */
+    .chat-sidebar {
+      width: 280px;
+      background: white;
+      border-right: 1px solid #e0e0e0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .sidebar-header {
+      padding: 1.5rem;
+      border-bottom: 1px solid #e0e0e0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .sidebar-header h2 {
+      margin: 0;
+      font-size: 1.25rem;
+      color: #2c3e50;
+    }
+
+    .new-chat-btn {
+      background: #3498db;
+      color: white;
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      font-weight: 500;
+      transition: background 0.2s;
+    }
+
+    .new-chat-btn:hover {
+      background: #2980b9;
+    }
+
+    .chat-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.5rem;
+    }
+
+    .chat-item {
+      padding: 0.75rem 1rem;
+      margin-bottom: 0.5rem;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+      border: 1px solid transparent;
+    }
+
+    .chat-item:hover {
+      background: #f8f9fa;
+    }
+
+    .chat-item.active {
+      background: #e3f2fd;
+      border-color: #3498db;
+    }
+
+    .chat-item-title {
+      font-weight: 500;
+      color: #2c3e50;
+      margin-bottom: 0.25rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .chat-item-preview {
+      font-size: 0.85rem;
+      color: #7f8c8d;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .chat-item-time {
+      font-size: 0.75rem;
+      color: #95a5a6;
+      margin-top: 0.25rem;
+    }
+
+    /* Main content area */
+    .main-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      max-width: 1000px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    /* Expand main content when video chat wrapper is active */
+    .main-content:has(.video-chat-wrapper.active),
+    .main-content.video-call-expanded {
+      max-width: 100% !important;
+      padding: 0 1rem;
+    }
+
+    .content-wrapper {
+      flex: 1;
+      overflow-y: auto;
+      padding: 2rem;
+    }
+
+    h1 {
+      color: #2c3e50;
+      margin-bottom: 0.5rem;
+    }
+
+    .subtitle {
+      color: #7f8c8d;
+      margin-bottom: 2rem;
+      font-size: 0.95rem;
+    }
+
+    .connection-status {
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      border-radius: 8px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .connection-status.connected {
+      background: #d4edda;
+      color: #155724;
+      border: 1px solid #c3e6cb;
+    }
+
+    .connection-status.disconnected {
+      background: #f8d7da;
+      color: #721c24;
+      border: 1px solid #f5c6cb;
+    }
+
+    .connection-status.connecting {
+      background: #fff3cd;
+      color: #856404;
+      border: 1px solid #ffeaa7;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .status-dot.connected { background: #28a745; }
+    .status-dot.disconnected { background: #dc3545; }
+    .status-dot.connecting { background: #ffc107; animation: pulse 1.5s infinite; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .controls {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 2rem;
+      flex-wrap: wrap;
+    }
+
+    button {
+      padding: 0.75rem 1.5rem;
+      font-size: 1rem;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-weight: 500;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+
+    #clearBtn {
+      background: #95a5a6;
+      color: white;
+    }
+
+    #clearBtn:hover:not(:disabled) {
+      background: #7f8c8d;
+    }
+
+    #disconnectBtn {
+      background: #e67e22;
+      color: white;
+    }
+
+    #disconnectBtn:hover:not(:disabled) {
+      background: #d35400;
+    }
+    
+    /* Connect state styling */
+    #disconnectBtn.connect-state {
+      background: #27ae60 !important;
+    }
+    
+    #disconnectBtn.connect-state:hover:not(:disabled) {
+      background: #229954 !important;
+    }
+
+
+    .conversation-container {
+      height: 50vh;
+      min-height: 300px;
+      max-height: 70vh;
+      overflow: hidden;
+      padding: 0;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      margin-top: 1rem;
+      display: flex;
+      flex-direction: column;
+    }
+    
+    /* Messages area - scrolls */
+    .conversation {
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+      flex: 1 1 auto;
+      min-height: 0; /* Important for flex scroll */
+      height: 100%;
+      overflow-y: auto !important;
+      overflow-x: hidden;
+      padding: 1rem;
+      scroll-behavior: smooth;
+    }
+
+    .conversation::-webkit-scrollbar {
+      width: 8px;
+    }
+
+    .conversation::-webkit-scrollbar-track {
+      background: #f1f1f1;
+      border-radius: 4px;
+    }
+
+    .conversation::-webkit-scrollbar-thumb {
+      background: #888;
+      border-radius: 4px;
+    }
+
+    .conversation::-webkit-scrollbar-thumb:hover {
+      background: #555;
+    }
+
+    .message {
+      padding: 1.25rem;
+      border-radius: 12px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      animation: slideIn 0.3s ease-out;
+    }
+
+    @keyframes slideIn {
+      from {
+        opacity: 0;
+        transform: translateY(10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .message-user {
+      background: #e8f5e9;
+      border-left: 4px solid #4caf50;
+      align-self: flex-end;
+      max-width: 80%;
+    }
+
+    .message-assistant {
+      background: #e3f2fd;
+      border-left: 4px solid #2196f3;
+      align-self: flex-start;
+      max-width: 80%;
+    }
+
+    .message-transient {
+      background: #fff3e0;
+      border-left: 4px solid #ff9800;
+      align-self: flex-start;
+      max-width: 80%;
+      font-style: italic;
+      opacity: 0.8;
+    }
+
+    .message-header {
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      color: #555;
+    }
+
+    .message-content {
+      line-height: 1.6;
+      word-wrap: break-word;
+    }
+
+    .message-content.streaming {
+      position: relative;
+    }
+
+    .message-content.streaming::after {
+      content: '▋';
+      animation: blink 1s infinite;
+      color: #2196f3;
+      margin-left: 2px;
+    }
+
+    @keyframes blink {
+      0%, 50% { opacity: 1; }
+      51%, 100% { opacity: 0; }
+    }
+
+    .audio-container {
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid rgba(0,0,0,0.1);
+    }
+
+    audio {
+      width: 100%;
+      margin-top: 0.5rem;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 3rem;
+      color: #95a5a6;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      flex: 1;
+    }
+    
+    .empty-state-icon {
+      font-size: 3rem;
+      opacity: 0.5;
+    }
+    
+    .empty-state-text {
+      font-size: 1.1rem;
+      color: #7f8c8d;
+    }
+    
+    .empty-state-hint {
+      font-size: 0.9rem;
+      color: #95a5a6;
+    }
+
+    .recording-indicator {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      background: #e74c3c;
+      border-radius: 50%;
+      margin-right: 0.5rem;
+      animation: pulse 1s infinite;
+    }
+
+    #log {
+      margin-top: 2rem;
+      padding: 1rem;
+      background: #2c3e50;
+      color: #ecf0f1;
+      border-radius: 8px;
+      font-family: 'Courier New', monospace;
+      font-size: 0.85rem;
+      white-space: pre-wrap;
+      max-height: 300px;
+      overflow-y: auto;
+      display: none;
+    }
+
+    #log.visible {
+      display: block;
+    }
+
+    .config-section {
+      margin-top: 1.5rem;
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      overflow: hidden;
+    }
+
+    .config-toggle {
+      width: 100%;
+      padding: 1rem;
+      background: #f8f9fa;
+      border: none;
+      border-bottom: 1px solid #e9ecef;
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 1rem;
+      font-weight: 500;
+      color: #2c3e50;
+      transition: background 0.2s;
+    }
+
+    .config-toggle:hover {
+      background: #e9ecef;
+    }
+
+    .config-content {
+      padding: 1.5rem;
+    }
+
+    .config-item {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .config-item label {
+      font-weight: 500;
+      color: #555;
+    }
+
+    .config-item input {
+      padding: 0.75rem;
+      border-radius: 6px;
+      border: 1px solid #ddd;
+      font-size: 0.95rem;
+      font-family: inherit;
+    }
+
+    .config-item input:focus {
+      outline: none;
+      border-color: #3498db;
+      box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+    }
+
+    .config-item button {
+      padding: 0.75rem 1.5rem;
+      background: #3498db;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.95rem;
+      font-weight: 500;
+      transition: background 0.2s;
+      align-self: flex-start;
+    }
+
+    .config-item button:hover {
+      background: #2980b9;
+    }
+
+    #configArrow {
+      transition: transform 0.3s;
+      font-size: 0.9rem;
+    }
+
+    .config-section.expanded #configArrow {
+      transform: rotate(180deg);
+    }
+
+    .toggle-log {
+      margin-top: 1rem;
+      background: #34495e;
+      color: white;
+      padding: 0.5rem 1rem;
+      font-size: 0.85rem;
+    }
+
+    /* Push-to-talk button - now inline with text input */
+    #pushToTalkBtn {
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      background: #3498db;
+      border: none;
+      box-shadow: 0 2px 6px rgba(52, 152, 219, 0.3);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      color: white;
+      transition: all 0.2s ease;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      flex-shrink: 0;
+    }
+
+    #pushToTalkBtn:hover {
+      background: #2980b9;
+      transform: scale(1.05);
+    }
+
+    #pushToTalkBtn:active,
+    #pushToTalkBtn.recording {
+      background: #e74c3c;
+      transform: scale(0.95);
+      box-shadow: 0 2px 8px rgba(231, 76, 60, 0.4);
+    }
+
+    #pushToTalkBtn:disabled {
+      background: #bdc3c7;
+      cursor: not-allowed;
+      transform: scale(1);
+      box-shadow: none;
+    }
+    
+    #pushToTalkBtn.recording::after {
+      content: '';
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      background: rgba(231, 76, 60, 0.3);
+      animation: recording-pulse 1.5s infinite;
+    }
+    
+    @keyframes recording-pulse {
+      0% { transform: scale(1); opacity: 1; }
+      100% { transform: scale(1.5); opacity: 0; }
+    }
+
+    /* Text Input Container - pinned at bottom of chat container */
+    .text-input-container {
+      flex-shrink: 0;
+      padding: 0.75rem 1rem;
+      border-top: 1px solid #e9ecef;
+      background: #f8f9fa;
+      border-radius: 0 0 12px 12px;
+    }
+
+    .text-input-wrapper {
+      display: flex;
+      gap: 0.5rem;
+      align-items: flex-end;
+      background: white;
+      border-radius: 24px;
+      padding: 0.5rem 0.5rem 0.5rem 1rem;
+      border: 1px solid #ddd;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    
+    .text-input-wrapper:focus-within {
+      border-color: #3498db;
+      box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+    }
+
+    #textInput {
+      flex: 1;
+      padding: 0.5rem 0;
+      border: none;
+      font-size: 1rem;
+      font-family: inherit;
+      resize: none;
+      max-height: 120px;
+      overflow-y: auto;
+      outline: none;
+      background: transparent;
+      line-height: 1.5;
+    }
+
+    #textInput::placeholder {
+      color: #adb5bd;
+    }
+
+    #textInput:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+
+    .send-text-btn {
+      width: 44px;
+      height: 44px;
+      padding: 0;
+      background: #27ae60;
+      color: white;
+      border: none;
+      border-radius: 50%;
+      font-size: 1.1rem;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .send-text-btn:hover:not(:disabled) {
+      background: #229954;
+      transform: scale(1.05);
+    }
+
+    .send-text-btn:disabled {
+      background: #bdc3c7;
+      cursor: not-allowed;
+    }
+
+    /* Add padding to bottom of page to prevent content from being hidden behind mic button */
+    .content-wrapper {
+      padding-bottom: 2rem;
+    }
+
+    @media (max-width: 768px) {
+      #pushToTalkBtn {
+        width: 40px;
+        height: 40px;
+        font-size: 16px;
+      }
+      .send-text-btn {
+        width: 40px;
+        height: 40px;
+      }
+      .chat-sidebar {
+        display: none;
+      }
+      .content-wrapper {
+        padding-bottom: 1rem;
+      }
+    }
+
+    /* New Chat Mode Selection Modal */
+    .chat-mode-modal {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 3000;
+      justify-content: center;
+      align-items: center;
+    }
+
+    .chat-mode-modal.active {
+      display: flex;
+    }
+
+    .chat-mode-content {
+      background: white;
+      border-radius: 16px;
+      padding: 2rem;
+      max-width: 700px;
+      width: 90%;
+      max-height: 85vh;
+      overflow-y: auto;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    }
+
+    .chat-mode-header {
+      text-align: center;
+      margin-bottom: 1.5rem;
+    }
+
+    .chat-mode-header h2 {
+      color: #2c3e50;
+      margin-bottom: 0.5rem;
+    }
+
+    .chat-mode-header p {
+      color: #7f8c8d;
+      font-size: 0.95rem;
+    }
+
+    .chat-mode-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .chat-mode-card {
+      background: #f8f9fa;
+      border: 2px solid #e0e0e0;
+      border-radius: 12px;
+      padding: 1.25rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .chat-mode-card:hover {
+      border-color: #3498db;
+      background: #e3f2fd;
+      transform: translateY(-2px);
+    }
+
+    .chat-mode-card.selected {
+      border-color: #3498db;
+      background: #e3f2fd;
+    }
+
+    .chat-mode-card-icon {
+      font-size: 2rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .chat-mode-card-title {
+      font-weight: 600;
+      color: #2c3e50;
+      margin-bottom: 0.25rem;
+    }
+
+    .chat-mode-card-desc {
+      font-size: 0.85rem;
+      color: #7f8c8d;
+      line-height: 1.4;
+    }
+
+    .chat-mode-templates {
+      margin-top: 1.5rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid #e0e0e0;
+    }
+
+    .chat-mode-templates h3 {
+      color: #2c3e50;
+      margin-bottom: 1rem;
+      font-size: 1rem;
+    }
+
+    .template-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.75rem;
+    }
+
+    .template-card {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border-radius: 10px;
+      padding: 1rem;
+      cursor: pointer;
+      color: white;
+      transition: all 0.2s;
+    }
+
+    .template-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+    }
+
+    .template-card.fashion { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }
+    .template-card.whiteboard { background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); }
+    .template-card.notes { background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); }
+
+    .template-card-icon {
+      font-size: 1.5rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .template-card-title {
+      font-weight: 600;
+      font-size: 0.9rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .template-card-desc {
+      font-size: 0.75rem;
+      opacity: 0.9;
+      line-height: 1.3;
+    }
+
+    .chat-mode-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.75rem;
+      margin-top: 1.5rem;
+    }
+
+    .chat-mode-btn {
+      padding: 0.75rem 1.5rem;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .chat-mode-btn.cancel {
+      background: #e0e0e0;
+      border: none;
+      color: #555;
+    }
+
+    .chat-mode-btn.cancel:hover {
+      background: #d0d0d0;
+    }
+
+    .chat-mode-btn.start {
+      background: #3498db;
+      border: none;
+      color: white;
+    }
+
+    .chat-mode-btn.start:hover {
+      background: #2980b9;
+    }
+
+    .chat-mode-btn.start:disabled {
+      background: #bdc3c7;
+      cursor: not-allowed;
+    }
+
+    /* Vision chat webcam preview */
+    .vision-preview {
+      display: none;
+      margin-top: 1rem;
+      text-align: center;
+    }
+
+    .vision-preview.active {
+      display: block;
+    }
+
+    .vision-preview video {
+      width: 100%;
+      max-width: 320px;
+      border-radius: 8px;
+      background: #000;
+      transform: scaleX(-1);
+    }
+
+    .vision-preview-status {
+      font-size: 0.85rem;
+      color: #7f8c8d;
+      margin-top: 0.5rem;
+    }
+
+    /* Vision mode indicator in chat */
+    .vision-mode-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+
+    .chat-item .vision-mode-badge {
+      margin-top: 0.25rem;
+    }
+
+    /* Voice Call Mode Badge */
+    .call-mode-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      background: linear-gradient(135deg, #00b894 0%, #00cec9 100%);
+      color: white;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+
+    /* Voice Call UI */
+    .voice-call-container {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      border-radius: 16px;
+      margin-bottom: 1rem;
+      color: white;
+    }
+
+    .voice-call-container.active {
+      display: flex;
+    }
+
+    .voice-call-status {
+      font-size: 1.2rem;
+      font-weight: 600;
+      margin-bottom: 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .voice-call-status .status-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #00b894;
+      animation: pulse-dot 2s infinite;
+    }
+
+    .voice-call-status.listening .status-dot {
+      background: #00b894;
+    }
+
+    .voice-call-status.hearing .status-dot {
+      background: #0984e3;
+      animation: pulse-dot 0.5s infinite;
+    }
+
+    .voice-call-status.processing .status-dot {
+      background: #fdcb6e;
+      animation: pulse-dot 0.3s infinite;
+    }
+
+    .voice-call-status.speaking .status-dot {
+      background: #e17055;
+      animation: pulse-dot 0.8s infinite;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.3); opacity: 0.7; }
+    }
+
+    .voice-waveform {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      height: 80px;
+      margin-bottom: 1.5rem;
+    }
+
+    .voice-waveform .bar {
+      width: 6px;
+      background: linear-gradient(to top, #00b894, #00cec9);
+      border-radius: 3px;
+      transition: height 0.1s ease;
+    }
+
+    .voice-call-controls {
+      display: flex;
+      gap: 1rem;
+    }
+
+    .voice-call-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 60px;
+      height: 60px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+      font-size: 1.5rem;
+      transition: all 0.2s;
+    }
+
+    .voice-call-btn.mute {
+      background: #636e72;
+      color: white;
+    }
+
+    .voice-call-btn.mute:hover {
+      background: #2d3436;
+    }
+
+    .voice-call-btn.mute.muted {
+      background: #d63031;
+    }
+
+    .voice-call-btn.end {
+      background: #d63031;
+      color: white;
+    }
+
+    .voice-call-btn.end:hover {
+      background: #c0392b;
+    }
+
+    .voice-call-settings {
+      margin-top: 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      color: rgba(255,255,255,0.7);
+      font-size: 0.85rem;
+    }
+
+    .voice-call-settings input[type="range"] {
+      width: 100px;
+    }
+
+    /* Video Call Mode UI - Side by Side Layout */
+    .video-chat-wrapper {
+      display: none !important;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    .video-chat-wrapper.active {
+      display: flex !important;
+      flex-direction: row !important;
+      flex-wrap: nowrap !important;
+      align-items: stretch !important;
+      height: calc(100vh - 200px);
+      min-height: 500px;
+      width: 100%;
+    }
+
+    .video-chat-wrapper .video-call-container {
+      flex: 0 0 320px !important;
+      width: 320px !important;
+      min-width: 320px !important;
+      max-width: 320px !important;
+      height: 100%;
+      overflow-y: auto;
+      display: flex !important;
+    }
+
+    .video-chat-wrapper .conversation-container {
+      flex: 1 1 0 !important;
+      min-width: 0 !important;
+      margin-top: 0;
+      height: 100%;
+      min-height: 400px;
+      display: flex !important;
+      flex-direction: column !important;
+    }
+
+    .video-chat-wrapper .conversation-container .conversation {
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    /* Video chat conversation styling */
+    .video-chat-conversation {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+
+    /* Only stack vertically on very narrow screens (phones/small tablets) */
+    @media (max-width: 768px) {
+      .video-chat-wrapper.active {
+        flex-direction: column !important;
+        height: auto;
+      }
+      
+      .video-chat-wrapper .video-call-container {
+        max-width: 100% !important;
+        width: 100% !important;
+        min-width: 100% !important;
+        flex: 0 0 auto !important;
+      }
+      
+      .video-chat-wrapper .conversation-container {
+        height: 40vh;
+        min-height: 300px;
+      }
+    }
+
+    .video-call-container {
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      padding: 1.5rem;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+      border-radius: 16px;
+      color: white;
+    }
+
+    .video-call-container.active {
+      display: flex;
+    }
+
+    .video-call-webcam {
+      width: 100%;
+      max-width: 100%;
+      border-radius: 12px;
+      overflow: hidden;
+      margin-bottom: 1rem;
+      position: relative;
+      aspect-ratio: 4/3;
+    }
+
+    .video-call-webcam video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transform: scaleX(-1); /* Mirror */
+    }
+
+    .video-call-webcam-status {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      background: rgba(0,0,0,0.6);
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+    }
+
+    .video-call-status {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .video-call-waveform {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      height: 50px;
+      margin-bottom: 1rem;
+    }
+
+    .video-call-waveform .bar {
+      width: 4px;
+      background: linear-gradient(to top, #00b894, #00cec9);
+      border-radius: 2px;
+      transition: height 0.1s ease;
+    }
+
+    .video-call-controls {
+      display: flex;
+      gap: 1rem;
+    }
+
+    .video-call-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 50px;
+      height: 50px;
+      border-radius: 50%;
+      border: none;
+      cursor: pointer;
+      font-size: 1.3rem;
+      transition: all 0.2s;
+    }
+
+    .video-call-btn.mute {
+      background: #636e72;
+      color: white;
+    }
+
+    .video-call-btn.mute.muted {
+      background: #d63031;
+    }
+
+    .video-call-btn.camera {
+      background: #636e72;
+      color: white;
+    }
+
+    .video-call-btn.camera.off {
+      background: #d63031;
+    }
+
+    .video-call-btn.end {
+      background: #d63031;
+      color: white;
+    }
+
+    /* Push-to-Talk Button */
+    .video-call-ptt-btn {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem 3rem;
+      border-radius: 16px;
+      border: 3px solid #00b894;
+      background: rgba(0, 184, 148, 0.1);
+      color: white;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .video-call-ptt-btn:hover {
+      background: rgba(0, 184, 148, 0.2);
+      transform: scale(1.02);
+    }
+
+    .video-call-ptt-btn:active,
+    .video-call-ptt-btn.recording {
+      background: #00b894;
+      border-color: #00b894;
+      transform: scale(0.98);
+      box-shadow: 0 0 20px rgba(0, 184, 148, 0.5);
+    }
+
+    .video-call-ptt-btn .ptt-icon {
+      font-size: 2rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .video-call-ptt-btn .ptt-text {
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+
+    .video-call-ptt-btn .ptt-key {
+      font-size: 0.7rem;
+      opacity: 0.7;
+      margin-top: 0.25rem;
+      padding: 0.15rem 0.4rem;
+      background: rgba(255,255,255,0.1);
+      border-radius: 4px;
+    }
+
+    .video-call-ptt-btn.recording .ptt-icon {
+      animation: ptt-pulse 0.5s ease-in-out infinite alternate;
+    }
+
+    @keyframes ptt-pulse {
+      from { transform: scale(1); }
+      to { transform: scale(1.2); }
+    }
+
+    .video-call-mode-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      background: linear-gradient(135deg, #e17055 0%, #fdcb6e 100%);
+      color: white;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+
+    /* Webcam container in vision chat */
+    .vision-webcam-container {
+      position: relative;
+      margin-bottom: 1rem;
+      border-radius: 12px;
+      overflow: hidden;
+      background: #000;
+    }
+
+    .vision-webcam-container video {
+      width: 100%;
+      max-height: 300px;
+      object-fit: cover;
+      transform: scaleX(-1);
+    }
+
+    .vision-webcam-container canvas {
+      display: none;
+    }
+
+    .vision-webcam-controls {
+      position: absolute;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .vision-controls-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .vision-continuous-controls {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 0.5rem 1rem;
+      border-radius: 20px;
+    }
+
+    .vision-continuous-controls label {
+      color: white;
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+
+    .vision-continuous-controls input[type="checkbox"] {
+      width: 16px;
+      height: 16px;
+      cursor: pointer;
+    }
+
+    .vision-continuous-controls input[type="range"] {
+      width: 80px;
+      cursor: pointer;
+    }
+
+    .vision-continuous-controls .freq-display {
+      color: #00d4ff;
+      font-size: 0.8rem;
+      font-weight: 600;
+      min-width: 30px;
+    }
+
+    .vision-continuous-indicator {
+      display: none;
+      color: #2ecc71;
+      font-size: 0.75rem;
+      animation: pulse 1s infinite;
+    }
+
+    .vision-continuous-indicator.active {
+      display: inline;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .vision-capture-btn {
+      background: rgba(255, 255, 255, 0.9);
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 20px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 0.85rem;
+      transition: all 0.2s;
+    }
+
+    .vision-capture-btn:hover {
+      background: white;
+      transform: scale(1.05);
+    }
+
+    @media (max-width: 768px) {
+      .chat-mode-grid {
+        grid-template-columns: 1fr;
+      }
+      .template-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <!-- Chat Mode Selection Modal -->
+  <div class="chat-mode-modal" id="chatModeModal">
+    <div class="chat-mode-content">
+      <div class="chat-mode-header">
+        <h2>Start New Chat</h2>
+        <p>Choose how you want to interact with Spark</p>
+      </div>
+
+      <div class="chat-mode-grid">
+        <div class="chat-mode-card selected" data-mode="text" onclick="selectChatMode('text')">
+          <div class="chat-mode-card-icon">💬</div>
+          <div class="chat-mode-card-title">Text Chat</div>
+          <div class="chat-mode-card-desc">Push-to-talk voice and text conversation</div>
+        </div>
+        <div class="chat-mode-card" data-mode="call" onclick="selectChatMode('call')">
+          <div class="chat-mode-card-icon">📞</div>
+          <div class="chat-mode-card-title">Voice Call</div>
+          <div class="chat-mode-card-desc">Hands-free conversation with auto voice detection</div>
+        </div>
+        <div class="chat-mode-card" data-mode="video" onclick="selectChatMode('video')">
+          <div class="chat-mode-card-icon">📹</div>
+          <div class="chat-mode-card-title">Video Call</div>
+          <div class="chat-mode-card-desc">Hands-free with camera - show and ask anything</div>
+        </div>
+        <div class="chat-mode-card" data-mode="vision" onclick="selectChatMode('vision')">
+          <div class="chat-mode-card-icon">📷</div>
+          <div class="chat-mode-card-title">Vision Chat</div>
+          <div class="chat-mode-card-desc">Use your webcam to share what you see with Spark</div>
+        </div>
+      </div>
+
+      <div class="vision-preview" id="visionPreview">
+        <video id="modePreviewVideo" autoplay playsinline muted></video>
+        <div class="vision-preview-status" id="visionPreviewStatus">Camera preview</div>
+      </div>
+
+      <div class="chat-mode-templates" id="visionTemplates" style="display: none;">
+        <h3>🎯 Vision Assistant Templates</h3>
+        <div class="template-grid">
+          <div class="template-card fashion" data-template="fashion" onclick="selectTemplate('fashion')">
+            <div class="template-card-icon">👗</div>
+            <div class="template-card-title">Fashion Assistant</div>
+            <div class="template-card-desc">Ask about your outfit & get style tips</div>
+          </div>
+          <div class="template-card whiteboard" data-template="whiteboard" onclick="selectTemplate('whiteboard')">
+            <div class="template-card-icon">📋</div>
+            <div class="template-card-title">Whiteboard Co-Pilot</div>
+            <div class="template-card-desc">Ask questions about your board</div>
+          </div>
+          <div class="template-card notes" data-template="notes" onclick="selectTemplate('notes')">
+            <div class="template-card-icon">📝</div>
+            <div class="template-card-title">Notes → Plan</div>
+            <div class="template-card-desc">Ask to extract tasks from your notes</div>
+          </div>
+        </div>
+        <h3 style="margin-top: 1rem;">🔄 Monitoring Mode</h3>
+        <div class="template-grid" style="grid-template-columns: 1fr;">
+          <div class="template-card" data-template="polling" onclick="selectTemplate('polling')" style="background: linear-gradient(135deg, #6c5ce7 0%, #a29bfe 100%);">
+            <div class="template-card-icon">🔄</div>
+            <div class="template-card-title">VLM Polling Mode</div>
+            <div class="template-card-desc">Continuously describes what it sees at set intervals (for monitoring/logging)</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="chat-mode-actions">
+        <button class="chat-mode-btn cancel" onclick="closeChatModeModal()">Cancel</button>
+        <button class="chat-mode-btn start" id="startChatBtn" onclick="startSelectedChat()">Start Chat</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="main-container">
+    <!-- Left Sidebar for Chat History -->
+    <div class="chat-sidebar">
+      <div class="sidebar-header">
+        <h2>Chats</h2>
+        <button class="new-chat-btn" id="newChatBtn" onclick="createNewChat()">+ New</button>
+      </div>
+      <div class="chat-list" id="chatList">
+        <!-- Chat items will be dynamically added here -->
+      </div>
+    </div>
+
+    <!-- Main Content Area -->
+    <div class="main-content">
+      <div class="content-wrapper">
+        <h1>🎤 SparkVoice</h1>
+        <p class="subtitle"></p>
+
+        <div id="connectionStatus" class="connection-status connecting">
+          <span class="status-dot connecting"></span>
+          <span>Connecting...</span>
+        </div>
+
+  <div class="controls">
+    <button id="clearBtn">Clear Chat</button>
+    <button id="disconnectBtn">Disconnect</button>
+    <div style="margin-left: auto; display: flex; align-items: center; gap: 0.5rem;">
+      <label for="voiceSelect" style="font-weight: 500;">Voice:</label>
+      <select id="voiceSelect" style="padding: 0.5rem; border-radius: 6px; border: 1px solid #ddd; font-size: 0.95rem;">
+        <option value="af_bella" selected>Bella</option>
+        <option value="af_heart">Heart</option>
+        <option value="af_nicole">Nicole</option>
+        <option value="af_jessica">Jessica</option>
+        <option value="af_isabella">Isabella</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Voice Call Mode UI -->
+  <div class="voice-call-container" id="voiceCallContainer">
+    <div class="voice-call-status listening" id="voiceCallStatus">
+      <span class="status-dot"></span>
+      <span id="voiceCallStatusText">Listening...</span>
+    </div>
+    
+    <div class="voice-waveform" id="voiceWaveform">
+      <!-- Bars will be generated by JS -->
+    </div>
+    
+    <div class="voice-call-controls">
+      <button class="voice-call-btn mute" id="voiceCallMuteBtn" onclick="toggleVoiceCallMute()" title="Mute">
+        🎤
+      </button>
+      <button class="voice-call-btn end" id="voiceCallEndBtn" onclick="endVoiceCall()" title="End Call">
+        📞
+      </button>
+    </div>
+    
+    <div class="voice-call-settings">
+      <label>Sensitivity:</label>
+      <input type="range" id="vadSensitivity" min="0" max="1" step="0.1" value="0.5" onchange="updateVadSensitivity(this.value)">
+    </div>
+  </div>
+
+  <!-- Video Call Mode UI - Side by Side Wrapper -->
+  <div class="video-chat-wrapper" id="videoChatWrapper">
+    <div class="video-call-container" id="videoCallContainer">
+      <div class="video-call-webcam">
+        <video id="videoCallWebcam" autoplay playsinline muted></video>
+        <div class="video-call-webcam-status" id="videoCallWebcamStatus">📹 Camera On</div>
+      </div>
+      
+      <div class="video-call-status listening" id="videoCallStatus">
+        <span class="status-dot"></span>
+        <span id="videoCallStatusText">Listening...</span>
+      </div>
+      
+      <div class="video-call-waveform" id="videoCallWaveform">
+        <!-- Bars will be generated by JS -->
+      </div>
+      
+      <div class="video-call-controls">
+        <button class="video-call-btn mute" id="videoCallMuteBtn" onclick="toggleVideoCallMute()" title="Mute">
+          🎤
+        </button>
+        <button class="video-call-btn camera" id="videoCallCameraBtn" onclick="toggleVideoCallCamera()" title="Camera">
+          📷
+        </button>
+        <button class="video-call-btn" id="videoCallSettingsBtn" onclick="toggleVideoCallSettings()" title="Settings" style="background: #0984e3;">
+          ⚙️
+        </button>
+        <button class="video-call-btn end" id="videoCallEndBtn" onclick="endVideoCall()" title="End Call">
+          📹
+        </button>
+      </div>
+      
+      <!-- Push-to-Talk Button (shown when PTT mode is enabled) -->
+      <div class="video-call-ptt" id="videoCallPttContainer" style="display: none; margin-top: 1rem; text-align: center;">
+        <button class="video-call-ptt-btn" id="videoCallPttBtn" 
+                onmousedown="startPttRecording()" 
+                onmouseup="stopPttRecording()" 
+                onmouseleave="stopPttRecording()"
+                ontouchstart="startPttRecording()" 
+                ontouchend="stopPttRecording()">
+          <span class="ptt-icon">🎤</span>
+          <span class="ptt-text">Hold to Talk</span>
+          <span class="ptt-key">SPACE</span>
+        </button>
+        <p style="font-size: 0.75rem; opacity: 0.7; margin-top: 0.5rem;">Hold button or press SPACE to talk</p>
+      </div>
+      
+      <!-- Collapsible Settings Panel -->
+      <div class="video-call-settings-panel" id="videoCallSettingsPanel" style="display: none; width: 100%; margin-top: 1rem;">
+        <div style="background: rgba(255,255,255,0.1); border-radius: 8px; padding: 1rem;">
+          <!-- Input Mode Toggle (VAD vs PTT) -->
+          <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);">
+            <label style="font-size: 0.85rem; flex: 1;">
+              <strong>Input Mode</strong>
+            </label>
+            <div style="display: flex; gap: 0.5rem;">
+              <button id="vadModeBtn" onclick="setInputMode('vad')" style="padding: 0.4rem 0.8rem; border-radius: 4px; border: 2px solid #00b894; background: #00b894; color: white; cursor: pointer; font-size: 0.8rem; font-weight: bold;">
+                🎙️ VAD (Auto)
+              </button>
+              <button id="pttModeBtn" onclick="setInputMode('ptt')" style="padding: 0.4rem 0.8rem; border-radius: 4px; border: 2px solid #00b894; background: transparent; color: #00b894; cursor: pointer; font-size: 0.8rem;">
+                ⌨️ PTT (Space)
+              </button>
+            </div>
+          </div>
+          <p style="font-size: 0.75rem; opacity: 0.6; margin-bottom: 1rem;">💡 <strong>VAD:</strong> Auto-detects speech | <strong>PTT:</strong> Hold SPACE or button to talk</p>
+          
+          <!-- Barge-in Toggle -->
+          <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);">
+            <label style="font-size: 0.85rem; flex: 1;">
+              <strong>Barge-in</strong> <span style="opacity: 0.7;">(interrupt while speaking)</span>
+            </label>
+            <label style="display: flex; align-items: center; cursor: pointer;">
+              <input type="checkbox" id="bargeInToggle" onchange="toggleBargeIn(this.checked)" style="width: 18px; height: 18px; cursor: pointer;">
+              <span id="bargeInStatus" style="margin-left: 0.5rem; font-size: 0.8rem; color: #636e72;">OFF</span>
+            </label>
+          </div>
+          <p style="font-size: 0.75rem; opacity: 0.6; margin-bottom: 1rem;">💡 Use headphones to avoid echo. Disable if TTS triggers false interrupts.</p>
+          
+          <!-- System Prompt -->
+          <label style="font-size: 0.85rem; margin-bottom: 0.5rem; display: block;">System Prompt:</label>
+          <textarea id="videoCallSystemPrompt" rows="4" style="width: 100%; padding: 0.5rem; border-radius: 6px; border: none; font-size: 0.85rem; background: rgba(0,0,0,0.3); color: white; resize: vertical;"></textarea>
+          <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+            <button onclick="resetVideoCallPrompt()" style="padding: 0.4rem 0.8rem; border-radius: 4px; border: none; background: #636e72; color: white; cursor: pointer; font-size: 0.8rem;">Reset Default</button>
+            <button onclick="saveVideoCallPrompt()" style="padding: 0.4rem 0.8rem; border-radius: 4px; border: none; background: #00b894; color: white; cursor: pointer; font-size: 0.8rem;">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Conversation container inside the wrapper for side-by-side layout -->
+    <div class="conversation-container video-chat-conversation" id="videoConversationContainer">
+      <div class="conversation" id="videoConversation">
+        <div class="empty-state">
+          <div class="empty-state-icon">📹</div>
+          <div class="empty-state-text">Video call active</div>
+          <div class="empty-state-hint">Your conversation will appear here</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Regular conversation container (shown when not in video call) -->
+  <div class="conversation-container" id="conversationContainer">
+    <div class="conversation" id="conversation">
+      <div class="empty-state">
+        <div class="empty-state-icon">💬</div>
+        <div class="empty-state-text">Start a conversation</div>
+        <div class="empty-state-hint">Type a message or hold the mic button to talk</div>
+      </div>
+    </div>
+    
+    <!-- Text Input Area - inside conversation container -->
+    <div class="text-input-container" id="textInputContainer">
+      <div class="text-input-wrapper">
+        <button id="pushToTalkBtn" aria-label="Push to talk">🎤</button>
+        <textarea 
+          id="textInput" 
+          placeholder="Type a message or hold mic to talk..."
+          rows="1"
+        ></textarea>
+        <button id="sendTextBtn" class="send-text-btn" onclick="sendTextMessage()" title="Send message">
+          ➤
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="config-section">
+    <button class="config-toggle" id="configToggle" onclick="toggleConfig()">
+      <span>⚙️ Configuration</span>
+      <span id="configArrow">▼</span>
+    </button>
+    <div class="config-content" id="configContent" style="display: none;">
+      <div class="config-item">
+        <label for="systemPromptInput"><strong>System Prompt:</strong> <span id="systemPromptMode" style="font-size: 0.8rem; color: #7f8c8d;"></span></label>
+        <textarea id="systemPromptInput" rows="4" style="width: 100%; padding: 0.5rem; border-radius: 6px; border: 1px solid #ddd; font-family: inherit; resize: vertical;" placeholder="Loading default prompt..."></textarea>
+        <p style="margin-top: 0.5rem; font-size: 0.85rem; color: #666;">
+          <strong>Note:</strong> System prompt can only be edited when disconnected. Click "Disconnect" to edit, then "Connect" to reconnect.
+        </p>
+      </div>
+
+      <div class="config-item" style="margin-top: 1.5rem;">
+        <label style="display: block; margin-bottom: 0.75rem; font-weight: 600;"><strong>Capabilities:</strong></label>
+        <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+          <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: normal;">
+            <input type="checkbox" id="capWeather" value="weather" checked style="width: 18px; height: 18px; cursor: pointer;">
+            <span>Weather</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: normal;">
+            <input type="checkbox" id="capFilesystem" value="filesystem" style="width: 18px; height: 18px; cursor: pointer;">
+            <span>Filesystem</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: normal;">
+            <input type="checkbox" id="capCodingSandbox" value="coding_sandbox" style="width: 18px; height: 18px; cursor: pointer;">
+            <span>Coding Sandbox</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: normal;">
+            <input type="checkbox" id="capCalendar" value="calendar" style="width: 18px; height: 18px; cursor: pointer;">
+            <span>Calendar Access</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: normal;">
+            <input type="checkbox" id="capHomeAssistant" value="home_assistant" style="width: 18px; height: 18px; cursor: pointer;">
+            <span>Home Assistant</span>
+          </label>
+        </div>
+        <p style="margin-top: 0.75rem; font-size: 0.85rem; color: #666;">
+          <em>Enable/disable tools for the assistant. Weather tool is currently implemented.</em>
+        </p>
+      </div>
+
+      <div class="config-item" style="margin-top: 1.5rem;">
+        <label style="display: block; margin-bottom: 0.75rem; font-weight: 600;"><strong>Agents:</strong></label>
+        <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+          <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: normal;">
+            <input type="checkbox" id="agentCodingAssistant" value="coding_assistant" style="width: 18px; height: 18px; cursor: pointer;">
+            <span>🤖 Coding Assistant</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: normal;">
+            <input type="checkbox" id="agentMarkdownAssistant" value="markdown_assistant" checked style="width: 18px; height: 18px; cursor: pointer;">
+            <span>📝 Markdown Assistant</span>
+          </label>
+          <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: normal;">
+            <input type="checkbox" id="agentHtmlAssistant" value="html_assistant" style="width: 18px; height: 18px; cursor: pointer;">
+            <span>🌐 HTML Assistant</span>
+          </label>
+        </div>
+        <p style="margin-top: 0.75rem; font-size: 0.85rem; color: #666;">
+          <em>Complex agents that open specialized UIs for streaming output.</em>
+        </p>
+      </div>
+      
+    </div>
+  </div>
+
+  <!-- Agent Code Editor Modal -->
+  <div id="agentCodeEditorModal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 10000; padding: 2rem;">
+    <div style="background: white; border-radius: 12px; height: 100%; display: flex; flex-direction: column; max-width: 1400px; margin: 0 auto; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
+      <div style="padding: 1.5rem; border-bottom: 1px solid #e0e0e0; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <h2 style="margin: 0; font-size: 1.5rem; color: #2c3e50;">🤖 Coding Assistant</h2>
+          <p style="margin: 0.5rem 0 0 0; color: #666; font-size: 0.9rem;" id="agentTaskDescription">Working on your request...</p>
+        </div>
+        <button id="closeAgentModal" style="background: #e74c3c; color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 1rem;">Close</button>
+      </div>
+      <div style="flex: 1; overflow: hidden; padding: 1.5rem; display: flex; flex-direction: column; gap: 1rem;">
+        <!-- Code Section -->
+        <div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
+          <div style="background: #2d2d2d; padding: 0.5rem 1rem; border-radius: 8px 8px 0 0; border-bottom: 2px solid #1e1e1e;">
+            <span style="color: #858585; font-size: 0.85rem; font-weight: 600;">CODE</span>
+          </div>
+          <div style="background: #1e1e1e; border-radius: 0 0 8px 8px; padding: 1rem; font-family: 'Monaco', 'Menlo', 'Courier New', monospace; color: #d4d4d4; flex: 1; white-space: pre-wrap; overflow-x: auto; overflow-y: auto;" id="agentCodeEditor">
+            <span style="color: #569cd6;">//</span> <span style="color: #6a9955;">Waiting for agent to start writing code...</span>
+          </div>
+        </div>
+        <!-- Execution Output Section -->
+        <div style="flex: 0 0 auto; display: flex; flex-direction: column; max-height: 40%; min-height: 150px;">
+          <div style="background: #1a3a52; padding: 0.5rem 1rem; border-radius: 8px 8px 0 0; border-bottom: 2px solid #0d2a3d;">
+            <span style="color: #7dd3fc; font-size: 0.85rem; font-weight: 600;">📊 EXECUTION OUTPUT</span>
+          </div>
+          <div style="background: #0d2a3d; border-radius: 0 0 8px 8px; padding: 1rem; font-family: 'Monaco', 'Menlo', 'Courier New', monospace; color: #e0f2fe; white-space: pre-wrap; overflow-x: auto; overflow-y: auto; flex: 1;" id="agentExecutionOutput">
+            <span style="color: #7dd3fc; opacity: 0.7;">Waiting for execution...</span>
+          </div>
+        </div>
+      </div>
+      <div style="padding: 1rem; border-top: 1px solid #e0e0e0; background: #f8f9fa;">
+        <div style="display: flex; gap: 0.5rem; align-items: center;">
+          <div id="agentStatus" style="display: flex; align-items: center; gap: 0.5rem;">
+            <span style="width: 8px; height: 8px; background: #3498db; border-radius: 50%; animation: pulse 2s infinite;"></span>
+            <span style="color: #666;">Agent is working...</span>
+          </div>
+        </div>
+      </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Agent Markdown Editor Modal -->
+  <div id="agentMarkdownEditorModal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 10000; padding: 2rem;">
+    <div style="background: white; border-radius: 12px; height: 100%; display: flex; flex-direction: column; max-width: 1200px; margin: 0 auto; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
+      <div style="padding: 1.5rem; border-bottom: 1px solid #e0e0e0; display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <h2 style="margin: 0; font-size: 1.5rem; color: #2c3e50;">📝 Markdown Assistant</h2>
+          <p style="margin: 0.5rem 0 0 0; color: #666; font-size: 0.9rem;" id="markdownTaskDescription">Working on your document...</p>
+        </div>
+        <div style="display: flex; gap: 0.5rem;">
+          <button id="copyMarkdownBtn" style="background: #3498db; color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">📋 Copy</button>
+          <button id="closeMarkdownModal" style="background: #e74c3c; color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 1rem;">Close</button>
+        </div>
+      </div>
+      <div style="flex: 1; overflow: hidden; padding: 1.5rem; display: flex; gap: 1rem;">
+        <!-- Raw Markdown Section -->
+        <div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
+          <div style="background: #2d2d2d; padding: 0.5rem 1rem; border-radius: 8px 8px 0 0; border-bottom: 2px solid #1e1e1e;">
+            <span style="color: #858585; font-size: 0.85rem; font-weight: 600;">MARKDOWN</span>
+          </div>
+          <div style="background: #1e1e1e; border-radius: 0 0 8px 8px; padding: 1rem; font-family: 'Monaco', 'Menlo', 'Courier New', monospace; color: #d4d4d4; flex: 1; white-space: pre-wrap; overflow-x: auto; overflow-y: auto; font-size: 0.9rem; line-height: 1.5;" id="agentMarkdownEditor">
+            <span style="color: #6a9955;">// Waiting for agent to start writing...</span>
+          </div>
+        </div>
+        <!-- Preview Section -->
+        <div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
+          <div style="background: #f8f9fa; padding: 0.5rem 1rem; border-radius: 8px 8px 0 0; border-bottom: 2px solid #e9ecef;">
+            <span style="color: #495057; font-size: 0.85rem; font-weight: 600;">PREVIEW</span>
+          </div>
+          <div style="background: white; border: 1px solid #e9ecef; border-top: none; border-radius: 0 0 8px 8px; padding: 1.5rem; flex: 1; overflow-x: auto; overflow-y: auto; line-height: 1.6;" id="agentMarkdownPreview">
+            <span style="color: #adb5bd; font-style: italic;">Preview will appear here...</span>
+          </div>
+        </div>
+      </div>
+      <div style="padding: 1rem; border-top: 1px solid #e0e0e0; background: #f8f9fa;">
+        <div style="display: flex; gap: 0.5rem; align-items: center;">
+          <div id="markdownStatus" style="display: flex; align-items: center; gap: 0.5rem;">
+            <span style="width: 8px; height: 8px; background: #3498db; border-radius: 50%; animation: pulse 2s infinite;"></span>
+            <span style="color: #666;">Agent is working...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    /* Markdown Preview Styles */
+    #agentMarkdownPreview h1 { font-size: 1.8rem; margin: 1rem 0 0.5rem 0; color: #2c3e50; border-bottom: 2px solid #e9ecef; padding-bottom: 0.5rem; }
+    #agentMarkdownPreview h2 { font-size: 1.5rem; margin: 1rem 0 0.5rem 0; color: #34495e; border-bottom: 1px solid #e9ecef; padding-bottom: 0.3rem; }
+    #agentMarkdownPreview h3 { font-size: 1.25rem; margin: 0.8rem 0 0.4rem 0; color: #495057; }
+    #agentMarkdownPreview h4 { font-size: 1.1rem; margin: 0.6rem 0 0.3rem 0; color: #495057; }
+    #agentMarkdownPreview p { margin: 0.5rem 0; }
+    #agentMarkdownPreview ul, #agentMarkdownPreview ol { margin: 0.5rem 0; padding-left: 1.5rem; }
+    #agentMarkdownPreview li { margin: 0.25rem 0; }
+    #agentMarkdownPreview code { background: #f1f3f4; padding: 0.15rem 0.4rem; border-radius: 4px; font-family: 'Monaco', 'Menlo', monospace; font-size: 0.9em; color: #c7254e; }
+    #agentMarkdownPreview pre { background: #1e1e1e; color: #d4d4d4; padding: 1rem; border-radius: 6px; overflow-x: auto; margin: 0.5rem 0; }
+    #agentMarkdownPreview pre code { background: none; padding: 0; color: #d4d4d4; }
+    #agentMarkdownPreview blockquote { border-left: 4px solid #3498db; margin: 0.5rem 0; padding-left: 1rem; color: #666; background: #f8f9fa; padding: 0.5rem 1rem; }
+    /* Enhanced Table Styles */
+    #agentMarkdownPreview table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.95rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    #agentMarkdownPreview thead { background: linear-gradient(to bottom, #f8f9fa, #e9ecef); }
+    #agentMarkdownPreview th { border: 1px solid #dee2e6; padding: 0.75rem 1rem; text-align: left; font-weight: 600; color: #2c3e50; }
+    #agentMarkdownPreview td { border: 1px solid #dee2e6; padding: 0.75rem 1rem; text-align: left; }
+    #agentMarkdownPreview tbody tr:nth-child(even) { background: #f8f9fa; }
+    #agentMarkdownPreview tbody tr:hover { background: #e3f2fd; }
+    #agentMarkdownPreview a { color: #3498db; text-decoration: none; }
+    #agentMarkdownPreview a:hover { text-decoration: underline; }
+    #agentMarkdownPreview hr { border: none; border-top: 2px solid #e9ecef; margin: 1.5rem 0; }
+    #agentMarkdownPreview strong { font-weight: 600; }
+    #agentMarkdownPreview em { font-style: italic; }
+    /* Mermaid diagram styles */
+    #agentMarkdownPreview .mermaid { background: #fff; padding: 1rem; border-radius: 8px; margin: 1rem 0; border: 1px solid #e9ecef; text-align: center; }
+    #agentMarkdownPreview .mermaid svg { max-width: 100%; height: auto; }
+    /* Fix for nested list items */
+    #agentMarkdownPreview ul ul, #agentMarkdownPreview ol ol, #agentMarkdownPreview ul ol, #agentMarkdownPreview ol ul { margin: 0.25rem 0; }
+  </style>
+
+  <!-- Agent HTML Editor Modal with Live Preview -->
+  <div id="agentHtmlEditorModal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 10000; padding: 2rem;">
+    <div style="background: white; border-radius: 12px; height: 100%; display: flex; flex-direction: column; max-width: 1400px; margin: 0 auto; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
+      <div style="padding: 1.5rem; border-bottom: 1px solid #e0e0e0; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(to right, #667eea, #764ba2); color: white; border-radius: 12px 12px 0 0;">
+        <div>
+          <h2 style="margin: 0; font-size: 1.5rem;">🌐 HTML Assistant</h2>
+          <p style="margin: 0.5rem 0 0 0; opacity: 0.9; font-size: 0.9rem;" id="htmlTaskDescription">Building your webpage...</p>
+        </div>
+        <div style="display: flex; gap: 0.5rem;">
+          <button id="copyHtmlBtn" onclick="copyHtmlCode()" style="background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.3); padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">📋 Copy</button>
+          <button id="downloadHtmlBtn" onclick="downloadHtml()" style="background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.3); padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">💾 Download</button>
+          <button onclick="closeHtmlEditor()" style="background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.3); padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 1rem;">✕ Close</button>
+        </div>
+      </div>
+      <div style="flex: 1; overflow: hidden; padding: 1rem; display: flex; gap: 1rem;">
+        <!-- Code Section -->
+        <div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
+          <div style="background: #2d2d2d; padding: 0.5rem 1rem; border-radius: 8px 8px 0 0; border-bottom: 2px solid #1e1e1e; display: flex; justify-content: space-between; align-items: center;">
+            <span style="color: #858585; font-size: 0.85rem; font-weight: 600;">HTML / CSS / JS</span>
+            <span id="htmlCharCount" style="color: #666; font-size: 0.75rem;">0 chars</span>
+          </div>
+          <div style="background: #1e1e1e; border-radius: 0 0 8px 8px; padding: 1rem; font-family: 'Monaco', 'Menlo', 'Courier New', monospace; color: #d4d4d4; flex: 1; white-space: pre-wrap; overflow-x: auto; overflow-y: auto; font-size: 0.85rem; line-height: 1.5;" id="agentHtmlEditor">
+            <span style="color: #6a9955;">// Waiting for agent to start writing...</span>
+          </div>
+        </div>
+        <!-- Live Preview Section -->
+        <div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
+          <div style="background: #f8f9fa; padding: 0.5rem 1rem; border-radius: 8px 8px 0 0; border-bottom: 2px solid #e9ecef; display: flex; justify-content: space-between; align-items: center;">
+            <span style="color: #495057; font-size: 0.85rem; font-weight: 600;">📱 LIVE PREVIEW</span>
+            <button onclick="refreshHtmlPreview()" style="background: #3498db; color: white; border: none; padding: 0.25rem 0.5rem; border-radius: 4px; cursor: pointer; font-size: 0.75rem;">🔄 Refresh</button>
+          </div>
+          <iframe id="agentHtmlPreview" style="flex: 1; border: 1px solid #e9ecef; border-top: none; border-radius: 0 0 8px 8px; background: white;" sandbox="allow-scripts allow-same-origin"></iframe>
+        </div>
+      </div>
+      <div style="padding: 1rem; border-top: 1px solid #e0e0e0; background: #f8f9fa; border-radius: 0 0 12px 12px;">
+        <div style="display: flex; gap: 0.5rem; align-items: center;">
+          <div id="htmlStatus" style="display: flex; align-items: center; gap: 0.5rem;">
+            <span style="width: 8px; height: 8px; background: #3498db; border-radius: 50%; animation: pulse 2s infinite;"></span>
+            <span style="color: #666;">Agent is building...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <button class="toggle-log" onclick="toggleLog()">Toggle Debug Log</button>
+  <div id="log"></div>
+
+<script>
+// Initialize mermaid for diagram rendering
+if (typeof mermaid !== 'undefined') {
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'default',
+    securityLevel: 'loose',
+    flowchart: { useMaxWidth: true, htmlLabels: true }
+  });
+}
+
+let mediaRecorder = null;
+let isRecording = false;
+let voiceWs = null;
+let audioContext = null;
+let activeAudioSources = []; // Track active audio sources for barge-in
+let masterGainNode = null; // For instant muting on barge-in
+let ttsAborted = false; // Block new audio after barge-in
+let nextPlayTime = null;
+let currentTransientMsg = null;
+let currentUserMsg = null;  // Track current user message being built
+
+const logEl = document.getElementById("log");
+const connectionStatusEl = document.getElementById("connectionStatus");
+const conversationContainerEl = document.getElementById("conversationContainer");
+const conversationEl = document.getElementById("conversation");
+const videoConversationEl = document.getElementById("videoConversation");
+const pushToTalkBtn = document.getElementById("pushToTalkBtn");
+const clearBtn = document.getElementById("clearBtn");
+const disconnectBtn = document.getElementById("disconnectBtn");
+const voiceSelect = document.getElementById("voiceSelect");
+const systemPromptInput = document.getElementById("systemPromptInput");
+const savePromptBtn = document.getElementById("savePromptBtn");
+const chatListEl = document.getElementById("chatList");
+const textInput = document.getElementById("textInput");
+const sendTextBtn = document.getElementById("sendTextBtn");
+
+// Helper to get the active conversation element based on current mode
+function getActiveConversationEl() {
+  // Check if video call is active
+  const wrapper = document.getElementById('videoChatWrapper');
+  if (wrapper && wrapper.classList.contains('active')) {
+    return videoConversationEl || conversationEl;
+  }
+  return conversationEl;
+}
+
+// Chat management state
+let currentChatId = null;  // Current active chat ID
+let chats = {};  // Store all chats: { chatId: { id, title, preview, timestamp, messages: [] } }
+
+// Chat management functions
+function generateChatId() {
+  return 'chat_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+function saveChatsToStorage() {
+  try {
+    localStorage.setItem('sparkvoice_chats', JSON.stringify(chats));
+  } catch (e) {
+    console.error('Failed to save chats to localStorage:', e);
+  }
+}
+
+function loadChatsFromStorage() {
+  try {
+    const stored = localStorage.getItem('sparkvoice_chats');
+    if (stored) {
+      chats = JSON.parse(stored);
+      renderChatList();
+    }
+  } catch (e) {
+    console.error('Failed to load chats from localStorage:', e);
+  }
+}
+
+// =============================================
+// Vision Mode & Chat Mode Selection
+// =============================================
+
+let selectedChatMode = 'text';
+let selectedTemplate = null;
+let modePreviewStream = null;
+let visionModeActive = false;
+let visionStream = null;
+let visionVideo = null;
+let visionCanvas = null;
+
+// Vision Assistant Templates with system prompts (must match backend VISION_TEMPLATE_PROMPTS)
+const VISION_TEMPLATES = {
+  fashion: {
+    name: 'Fashion Assistant',
+    icon: '👗',
+    mode: 'interactive',
+    systemPrompt: `You are a personal fashion assistant with expert knowledge in style, color coordination, and outfit planning. You can see the user through their webcam.
+
+Your capabilities:
+- Analyze clothing items the user shows you (color, style, formality, fit)
+- Recommend outfits based on occasions, weather, and personal style
+- Suggest complementary items and accessories
+- Provide styling tips and color coordination advice
+
+Context: The user may mention calendar events or occasions. Consider:
+- Work meetings → business casual or formal
+- Dates → smart casual, stylish
+- Casual outings → comfortable, trendy
+- Special events → occasion-appropriate
+
+You have access to tools:
+- markdown_assistant: Use to create wardrobe inventories or outfit plans
+
+Be helpful and specific. Reference what you actually see. Give actionable advice.`
+  },
+  whiteboard: {
+    name: 'Whiteboard Co-Pilot',
+    icon: '📋',
+    mode: 'interactive',
+    systemPrompt: `You are a whiteboard co-pilot that helps convert visual diagrams, sketches, and handwritten notes into structured documentation.
+
+Your capabilities:
+- Read and interpret whiteboard drawings, flowcharts, diagrams, and architecture sketches
+- Convert visual information into markdown documentation
+- Extract text, relationships, and structure from visual content
+- Generate specs, TODOs, decision logs, and technical documentation
+
+You have access to tools:
+- coding_assistant: Use to generate code that implements diagrams/flowcharts you see
+- markdown_assistant: Use to create documentation, specs, or notes from visual content
+
+When you see a whiteboard or diagram:
+1. First describe what you see (boxes, arrows, text, relationships)
+2. Ask if user wants code, documentation, or just a description
+3. Use the appropriate tool based on their request
+
+Be accurate and thorough. Capture all visible text and relationships.`
+  },
+  notes: {
+    name: 'Notes → Plan',
+    icon: '📝',
+    mode: 'interactive',
+    systemPrompt: `You are a productivity assistant that helps convert handwritten notes, sticky notes, and paper documents into actionable plans.
+
+Your capabilities:
+- Read handwritten text, printed documents, sticky notes, and to-do lists
+- Extract key information, tasks, deadlines, and priorities
+- Create structured task lists and project plans
+- Identify action items and suggest next steps
+
+Context awareness:
+- Look for dates, deadlines, and time-sensitive items
+- Identify people's names and responsibilities
+- Recognize project names and categorize tasks
+- Spot urgent vs. important items
+
+You have access to tools:
+- markdown_assistant: Use to create task lists, project plans, or meeting notes
+
+When analyzing notes:
+1. Read all visible text carefully
+2. Identify action items and deadlines
+3. Categorize by project or theme
+4. Suggest priorities
+
+Be actionable and organized. Output structured lists when appropriate.`
+  },
+  general: {
+    name: 'Vision Chat',
+    icon: '📷',
+    mode: 'interactive',
+    systemPrompt: `You are a helpful visual assistant that can see through the user's webcam.
+
+You have access to these tools:
+- coding_assistant: Use when asked to write, generate, or create code based on what you see
+- markdown_assistant: Use when asked to create documentation, notes, or markdown content
+- html_assistant: Use when asked to create HTML, build a webpage, or design a UI
+
+When to use tools:
+- "write code", "create a script", "implement this" → coding_assistant
+- "create documentation", "write markdown", "make notes" → markdown_assistant
+- "build a webpage", "create HTML", "design a page" → html_assistant
+
+When NOT to use tools:
+- Questions like "what do you see?", "describe this" → answer directly
+
+Be concise in direct answers (1-3 sentences). When using tools, describe the task clearly.`
+  },
+  polling: {
+    name: 'VLM Polling',
+    icon: '🔄',
+    mode: 'polling',
+    systemPrompt: `You are a visual monitoring assistant. Describe what you see in the camera feed briefly (1-2 sentences). Focus on:
+- People present and their actions
+- Objects and their positions
+- Any changes or movement
+- Text visible in the frame
+
+Be concise and factual. No need for tools in monitoring mode.`
+  }
+};
+
+function openChatModeModal() {
+  const modal = document.getElementById('chatModeModal');
+  modal.classList.add('active');
+  selectedChatMode = 'text';
+  selectedTemplate = null;
+  updateModeSelection();
+}
+
+function closeChatModeModal() {
+  const modal = document.getElementById('chatModeModal');
+  modal.classList.remove('active');
+  stopModePreview();
+}
+
+function selectChatMode(mode) {
+  console.log('📋 [SelectMode] selectChatMode called with mode:', mode);
+  selectedChatMode = mode;
+  selectedTemplate = null;
+  updateModeSelection();
+  
+  if (mode === 'vision') {
+    startModePreview();
+    document.getElementById('visionTemplates').style.display = 'block';
+  } else {
+    stopModePreview();
+    document.getElementById('visionTemplates').style.display = 'none';
+  }
+}
+
+function selectTemplate(template) {
+  selectedTemplate = template;
+  selectedChatMode = 'vision';
+  
+  // Update template card selection
+  document.querySelectorAll('.template-card').forEach(card => {
+    card.style.opacity = card.dataset.template === template ? '1' : '0.6';
+    card.style.transform = card.dataset.template === template ? 'scale(1.02)' : 'scale(1)';
+  });
+}
+
+function updateModeSelection() {
+  document.querySelectorAll('.chat-mode-card').forEach(card => {
+    card.classList.toggle('selected', card.dataset.mode === selectedChatMode);
+  });
+  
+  // Reset template selection visual
+  document.querySelectorAll('.template-card').forEach(card => {
+    card.style.opacity = '1';
+    card.style.transform = 'scale(1)';
+  });
+}
+
+async function startModePreview() {
+  const preview = document.getElementById('visionPreview');
+  const video = document.getElementById('modePreviewVideo');
+  const status = document.getElementById('visionPreviewStatus');
+  
+  preview.classList.add('active');
+  status.textContent = 'Starting camera...';
+  
+  try {
+    modePreviewStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 320 }, height: { ideal: 240 } },
+      audio: false
+    });
+    video.srcObject = modePreviewStream;
+    status.textContent = '✓ Camera ready';
+  } catch (err) {
+    console.error('Camera preview error:', err);
+    status.textContent = '❌ Camera not available: ' + err.message;
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+      status.textContent += ' (HTTPS required)';
+    }
+  }
+}
+
+function stopModePreview() {
+  const preview = document.getElementById('visionPreview');
+  const video = document.getElementById('modePreviewVideo');
+  
+  if (modePreviewStream) {
+    modePreviewStream.getTracks().forEach(track => track.stop());
+    modePreviewStream = null;
+  }
+  video.srcObject = null;
+  preview.classList.remove('active');
+}
+
+function startSelectedChat() {
+  console.log('🚀 [StartChat] startSelectedChat() called, selectedChatMode:', selectedChatMode);
+  closeChatModeModal();
+  
+  // Save current chat if exists
+  if (currentChatId && chats[currentChatId]) {
+    saveCurrentChat();
+  }
+  
+  // Teardown any existing modes
+  teardownVisionMode();
+  teardownVoiceCallMode();
+  teardownVideoCallMode();
+  
+  // Create new chat with mode info
+  const chatId = generateChatId();
+  const now = new Date();
+  const template = selectedTemplate || (selectedChatMode === 'vision' ? 'general' : null);
+  const templateInfo = template ? VISION_TEMPLATES[template] : null;
+  
+  // Determine chat title based on mode
+  let chatTitle = 'New Chat';
+  if (templateInfo) {
+    chatTitle = templateInfo.name;
+  } else if (selectedChatMode === 'call') {
+    chatTitle = '📞 Voice Call';
+  } else if (selectedChatMode === 'video') {
+    chatTitle = '📹 Video Call';
+  }
+  
+  chats[chatId] = {
+    id: chatId,
+    title: chatTitle,
+    preview: '',
+    timestamp: now.toISOString(),
+    messages: [],
+    mode: selectedChatMode,
+    template: template,
+    systemPrompt: templateInfo ? templateInfo.systemPrompt : null
+  };
+  
+  currentChatId = chatId;
+  saveChatsToStorage();
+  renderChatList();
+  loadChat(currentChatId);
+  
+  // Setup mode-specific UI
+  if (selectedChatMode === 'vision') {
+    setupVisionMode(template);
+  } else if (selectedChatMode === 'call') {
+    setupVoiceCallMode();
+  } else if (selectedChatMode === 'video') {
+    console.log('🎥 [StartChat] Video mode selected, calling setupVideoCallMode()');
+    setupVideoCallMode();
+  }
+  
+  // Clear conversation UI with appropriate message
+  if (selectedChatMode === 'vision' && templateInfo) {
+    let modeHint = '';
+    if (templateInfo.mode === 'polling') {
+      modeHint = 'Auto-describing what the camera sees every few seconds.';
+    } else {
+      modeHint = 'Ask questions about what you see - type or speak your question.';
+    }
+    conversationEl.innerHTML = `<div class="empty-state">
+      <span class="vision-mode-badge">${templateInfo.icon} ${templateInfo.name}</span>
+      <br><br>${modeHint}
+    </div>`;
+  } else if (selectedChatMode === 'vision') {
+    conversationEl.innerHTML = '<div class="empty-state"><span class="vision-mode-badge">📷 Vision Chat</span><br><br>Ask questions about what you see.</div>';
+  } else if (selectedChatMode === 'call') {
+    conversationEl.innerHTML = `<div class="empty-state">
+      <span class="call-mode-badge">📞 Voice Call</span>
+      <br><br>Just start talking - Spark will listen and respond automatically.
+    </div>`;
+  } else if (selectedChatMode === 'video') {
+    conversationEl.innerHTML = `<div class="empty-state">
+      <span class="video-call-mode-badge">📹 Video Call</span>
+      <br><br>Show and ask - Spark sees what you show and hears what you say.
+    </div>`;
+  } else {
+    conversationEl.innerHTML = '<div class="empty-state">Connect and start a conversation</div>';
+  }
+  currentTransientMsg = null;
+  
+  log(`New ${selectedChatMode} chat created: ${chatId}${template ? ' (template: ' + template + ')' : ''}`);
+}
+
+// ========================================
+// Voice Call Mode with VAD
+// ========================================
+
+let voiceCallActive = false;
+let vadInstance = null;
+let voiceCallMuted = false;
+let voiceCallAudioContext = null;
+let voiceCallAnalyser = null;
+let waveformBars = [];
+let audioChunks = [];
+let isCurrentlySpeaking = false;
+let lastVadSendTime = 0;
+const VAD_DEBOUNCE_MS = 500; // Prevent duplicate sends within 500ms
+
+async function setupVoiceCallMode() {
+  log('Setting up Voice Call mode with VAD...');
+  
+  const container = document.getElementById('voiceCallContainer');
+  const textInputContainer = document.getElementById('textInputContainer');
+  
+  // Show voice call UI, hide text input
+  container.classList.add('active');
+  if (textInputContainer) textInputContainer.style.display = 'none';
+  
+  // Initialize waveform bars
+  initWaveformBars();
+  
+  try {
+    // Check if VAD library is available
+    if (typeof vad === 'undefined') {
+      throw new Error('VAD library not loaded. Please refresh the page.');
+    }
+    
+    // Initialize VAD
+    vadInstance = await vad.MicVAD.new({
+      positiveSpeechThreshold: 0.5,
+      negativeSpeechThreshold: 0.35,
+      redemptionFrames: 8,
+      preSpeechPadFrames: 10,
+      minSpeechFrames: 3,
+      
+      onSpeechStart: () => {
+        if (voiceCallMuted) return;
+        log('VAD: Speech started');
+        
+        // BARGE-IN: If TTS is playing and barge-in is enabled, stop it
+        if (isTtsPlaying && bargeInEnabled) {
+          log('VAD: Barge-in triggered - stopping TTS');
+          stopTtsPlayback();
+          updateVoiceCallStatus('hearing', 'Interrupted - listening...');
+        } else {
+          updateVoiceCallStatus('hearing', 'Hearing you...');
+        }
+        
+        isCurrentlySpeaking = true;
+        audioChunks = [];
+      },
+      
+      onSpeechEnd: (audio) => {
+        if (voiceCallMuted) return;
+        
+        // Debounce to prevent duplicate sends
+        const now = Date.now();
+        if (now - lastVadSendTime < VAD_DEBOUNCE_MS) {
+          log('VAD: Debounced duplicate speech end');
+          return;
+        }
+        lastVadSendTime = now;
+        
+        log('VAD: Speech ended, processing audio...');
+        isCurrentlySpeaking = false;
+        updateVoiceCallStatus('processing', 'Processing...');
+        
+        // Convert Float32Array to WAV and send
+        sendVoiceCallAudio(audio);
+      },
+      
+      onVADMisfire: () => {
+        log('VAD: Misfire (too short)');
+        if (!isCurrentlySpeaking) {
+          updateVoiceCallStatus('listening', 'Listening...');
+        }
+      }
+    });
+    
+    // Start VAD
+    vadInstance.start();
+    voiceCallActive = true;
+    updateVoiceCallStatus('listening', 'Listening...');
+    log('Voice Call mode active with VAD');
+    
+    // Start waveform animation
+    startWaveformAnimation();
+    
+  } catch (error) {
+    log(`VAD initialization error: ${error.message}`);
+    console.error('VAD error:', error);
+    
+    // Fallback message
+    updateVoiceCallStatus('listening', 'VAD unavailable - using fallback');
+    
+    // Show error in UI
+    addMessage('system', `⚠️ Voice Activity Detection could not initialize: ${error.message}. Falling back to push-to-talk mode.`);
+  }
+}
+
+function initWaveformBars() {
+  const waveform = document.getElementById('voiceWaveform');
+  waveform.innerHTML = '';
+  waveformBars = [];
+  
+  const numBars = 20;
+  for (let i = 0; i < numBars; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    bar.style.height = '10px';
+    waveform.appendChild(bar);
+    waveformBars.push(bar);
+  }
+}
+
+function startWaveformAnimation() {
+  if (!voiceCallActive) return;
+  
+  // Animate bars based on voice activity
+  const animate = () => {
+    if (!voiceCallActive) return;
+    
+    waveformBars.forEach((bar, i) => {
+      let height;
+      if (isCurrentlySpeaking) {
+        // Active speaking - random heights
+        height = Math.random() * 60 + 20;
+      } else {
+        // Idle - gentle wave
+        const time = Date.now() / 1000;
+        height = Math.sin(time * 2 + i * 0.3) * 10 + 15;
+      }
+      bar.style.height = `${height}px`;
+    });
+    
+    requestAnimationFrame(animate);
+  };
+  
+  animate();
+}
+
+function updateVoiceCallStatus(state, text) {
+  const statusEl = document.getElementById('voiceCallStatus');
+  const textEl = document.getElementById('voiceCallStatusText');
+  
+  statusEl.className = `voice-call-status ${state}`;
+  textEl.textContent = text;
+}
+
+async function sendVoiceCallAudio(audioFloat32) {
+  if (!voiceWs || voiceWs.readyState !== WebSocket.OPEN) {
+    log('WebSocket not connected, cannot send audio');
+    updateVoiceCallStatus('listening', 'Not connected');
+    return;
+  }
+  
+  try {
+    // Convert Float32Array to WAV blob
+    const wavBlob = float32ToWav(audioFloat32, 16000);
+    
+    // Convert to base64 or send as binary
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const base64 = reader.result.split(',')[1];
+      
+      // Send audio for ASR
+      voiceWs.send(JSON.stringify({
+        type: 'asr_audio',
+        audio: base64,
+        format: 'wav'
+      }));
+      
+      log('Sent voice call audio for ASR');
+    };
+    reader.readAsDataURL(wavBlob);
+    
+  } catch (error) {
+    log(`Error sending voice call audio: ${error.message}`);
+    updateVoiceCallStatus('listening', 'Error - Listening...');
+  }
+}
+
+function float32ToWav(float32Array, sampleRate) {
+  const buffer = new ArrayBuffer(44 + float32Array.length * 2);
+  const view = new DataView(buffer);
+  
+  // WAV header
+  const writeString = (offset, string) => {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
+  };
+  
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + float32Array.length * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // Mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, float32Array.length * 2, true);
+  
+  // Convert float32 to int16
+  let offset = 44;
+  for (let i = 0; i < float32Array.length; i++) {
+    const s = Math.max(-1, Math.min(1, float32Array[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    offset += 2;
+  }
+  
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+function toggleVoiceCallMute() {
+  voiceCallMuted = !voiceCallMuted;
+  const btn = document.getElementById('voiceCallMuteBtn');
+  
+  if (voiceCallMuted) {
+    btn.classList.add('muted');
+    btn.textContent = '🔇';
+    updateVoiceCallStatus('listening', 'Muted');
+  } else {
+    btn.classList.remove('muted');
+    btn.textContent = '🎤';
+    updateVoiceCallStatus('listening', 'Listening...');
+  }
+  
+  log(`Voice call muted: ${voiceCallMuted}`);
+}
+
+function updateVadSensitivity(value) {
+  log(`VAD sensitivity updated to: ${value}`);
+  // Note: VAD sensitivity would need to be re-initialized to change
+  // For now, just log the value
+}
+
+function endVoiceCall() {
+  log('Ending voice call mode');
+  teardownVoiceCallMode();
+  
+  // Switch back to text mode
+  const container = document.getElementById('voiceCallContainer');
+  const textInputContainer = document.getElementById('textInputContainer');
+  
+  container.classList.remove('active');
+  if (textInputContainer) textInputContainer.style.display = 'flex';
+  
+  // Update chat mode
+  if (currentChatId && chats[currentChatId]) {
+    chats[currentChatId].mode = 'text';
+    saveChatsToStorage();
+  }
+  
+  addMessage('system', '📞 Voice call ended. Switched to text mode.');
+}
+
+function teardownVoiceCallMode() {
+  voiceCallActive = false;
+  
+  if (vadInstance) {
+    try {
+      vadInstance.pause();
+      vadInstance.destroy();
+    } catch (e) {
+      console.error('Error destroying VAD:', e);
+    }
+    vadInstance = null;
+  }
+  
+  if (voiceCallAudioContext) {
+    voiceCallAudioContext.close();
+    voiceCallAudioContext = null;
+  }
+  
+  const container = document.getElementById('voiceCallContainer');
+  if (container) container.classList.remove('active');
+  
+  log('Voice call mode torn down');
+}
+
+// ========================================
+// Video Call Mode (VAD + Webcam + VLM)
+// ========================================
+
+let videoCallActive = false;
+let videoCallVadInstance = null;
+let videoCallMuted = false;
+let videoCallCameraOn = true;
+let videoCallStream = null;
+let videoCallWaveformBars = [];
+let videoCallSpeaking = false;
+let lastVideoCallSendTime = 0;
+const VIDEO_CALL_DEBOUNCE_MS = 1000; // 1 second debounce to prevent duplicate sends
+
+// Barge-in support
+let bargeInEnabled = false; // Default off to avoid accidental interrupts
+let isTtsPlaying = false;
+
+// Push-to-Talk support
+let pttMode = false; // false = VAD mode, true = PTT mode
+let pttRecording = false;
+let pttMediaRecorder = null;
+let pttAudioChunks = [];
+let pttAudioContext = null;
+let pttStream = null;
+
+// Default video call system prompt
+const DEFAULT_VIDEO_CALL_PROMPT = `You are on a live video call. You can see the user. Respond ONLY to what they ask.
+
+RULES:
+- Answer ONLY the specific question asked
+- Do NOT describe the scene unless asked
+- Do NOT mention things the user didn't ask about
+- Keep responses brief and natural (spoken aloud via TTS)
+- If user says "okay", "thanks", "got it" - just acknowledge briefly
+
+Be a helpful friend on a video call, not a surveillance camera.`;
+
+let videoCallCustomPrompt = null; // null means use default
+
+async function setupVideoCallMode() {
+  console.log('🎥 [VideoCall] setupVideoCallMode() CALLED!');
+  log('Setting up Video Call mode with VAD + Webcam...');
+  
+  const wrapper = document.getElementById('videoChatWrapper');
+  const container = document.getElementById('videoCallContainer');
+  const textInputContainer = document.getElementById('textInputContainer');
+  const regularConversation = document.getElementById('conversationContainer');
+  const mainContent = document.querySelector('.main-content');
+  
+  // Debug logging
+  console.log('[VideoCall] wrapper element:', wrapper);
+  console.log('[VideoCall] container element:', container);
+  console.log('[VideoCall] mainContent element:', mainContent);
+  
+  // Show video call wrapper (side-by-side layout), hide regular conversation and text input
+  if (wrapper) {
+    wrapper.classList.add('active');
+    // Force inline styles for side-by-side layout
+    wrapper.style.display = 'flex';
+    wrapper.style.flexDirection = 'row';
+    wrapper.style.gap = '1rem';
+    wrapper.style.height = 'calc(100vh - 200px)';
+    wrapper.style.minHeight = '500px';
+    console.log('[VideoCall] Added active class to wrapper. Classes:', wrapper.className);
+    console.log('[VideoCall] Wrapper computed display:', window.getComputedStyle(wrapper).display);
+    console.log('[VideoCall] Wrapper computed flex-direction:', window.getComputedStyle(wrapper).flexDirection);
+  } else {
+    console.error('[VideoCall] ERROR: videoChatWrapper not found!');
+  }
+  
+  if (container) {
+    container.classList.add('active');
+    // Force inline styles for fixed width
+    container.style.flex = '0 0 320px';
+    container.style.width = '320px';
+    container.style.minWidth = '320px';
+    container.style.maxWidth = '320px';
+    console.log('[VideoCall] Added active class to container. Classes:', container.className);
+  }
+  
+  // Force conversation container to take remaining space
+  const videoConversation = document.getElementById('videoConversationContainer');
+  if (videoConversation) {
+    videoConversation.style.flex = '1';
+    videoConversation.style.minWidth = '0';
+    videoConversation.style.display = 'flex';
+    videoConversation.style.flexDirection = 'column';
+    console.log('[VideoCall] Video conversation container styled');
+  }
+  
+  if (mainContent) {
+    mainContent.classList.add('video-call-expanded');
+    mainContent.style.maxWidth = '100%';
+    console.log('[VideoCall] Added video-call-expanded to mainContent. Classes:', mainContent.className);
+  }
+  
+  if (textInputContainer) textInputContainer.style.display = 'none';
+  if (regularConversation) regularConversation.style.display = 'none';
+  
+  // Initialize waveform bars
+  initVideoCallWaveformBars();
+  
+  // Start webcam
+  try {
+    const video = document.getElementById('videoCallWebcam');
+    videoCallStream = await navigator.mediaDevices.getUserMedia({ 
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false // Audio handled by VAD
+    });
+    video.srcObject = videoCallStream;
+    await video.play();
+    log('Video call webcam started');
+  } catch (err) {
+    log(`Webcam error: ${err.message}`);
+    document.getElementById('videoCallWebcamStatus').textContent = '❌ Camera Error';
+  }
+  
+  // Initialize VAD
+  try {
+    if (typeof vad === 'undefined') {
+      throw new Error('VAD library not loaded');
+    }
+    
+    videoCallVadInstance = await vad.MicVAD.new({
+      positiveSpeechThreshold: 0.5,
+      negativeSpeechThreshold: 0.35,
+      redemptionFrames: 8,
+      preSpeechPadFrames: 10,
+      minSpeechFrames: 3,
+      
+      onSpeechStart: () => {
+        if (videoCallMuted) return;
+        log(`Video VAD: Speech started (isTtsPlaying: ${isTtsPlaying}, bargeInEnabled: ${bargeInEnabled})`);
+        
+        // BARGE-IN: If TTS is playing and barge-in is enabled, stop it
+        if (isTtsPlaying && bargeInEnabled) {
+          log('Video VAD: Barge-in triggered - stopping TTS');
+          stopTtsPlayback();
+          updateVideoCallStatus('hearing', 'Interrupted - listening...');
+        } else {
+          updateVideoCallStatus('hearing', 'Hearing you...');
+        }
+        
+        videoCallSpeaking = true;
+      },
+      
+      onSpeechEnd: (audio) => {
+        if (videoCallMuted) return;
+        
+        log('Video VAD: Speech ended, capturing frame + audio...');
+        videoCallSpeaking = false;
+        updateVideoCallStatus('processing', 'Looking & thinking...');
+        
+        // Capture frame and send with audio (debounce is in sendVideoCallData)
+        sendVideoCallData(audio);
+      },
+      
+      onVADMisfire: () => {
+        if (!videoCallSpeaking) {
+          updateVideoCallStatus('listening', 'Listening...');
+        }
+      }
+    });
+    
+    videoCallVadInstance.start();
+    videoCallActive = true;
+    updateVideoCallStatus('listening', 'Listening...');
+    log('Video Call mode active');
+    
+    startVideoCallWaveformAnimation();
+    
+  } catch (error) {
+    log(`VAD error: ${error.message}`);
+    updateVideoCallStatus('listening', 'VAD error');
+  }
+}
+
+function initVideoCallWaveformBars() {
+  const waveform = document.getElementById('videoCallWaveform');
+  waveform.innerHTML = '';
+  videoCallWaveformBars = [];
+  
+  for (let i = 0; i < 15; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    bar.style.height = '8px';
+    waveform.appendChild(bar);
+    videoCallWaveformBars.push(bar);
+  }
+}
+
+function startVideoCallWaveformAnimation() {
+  const animate = () => {
+    if (!videoCallActive) return;
+    
+    videoCallWaveformBars.forEach((bar, i) => {
+      let height;
+      if (videoCallSpeaking) {
+        height = Math.random() * 40 + 15;
+      } else {
+        const time = Date.now() / 1000;
+        height = Math.sin(time * 2 + i * 0.3) * 8 + 12;
+      }
+      bar.style.height = `${height}px`;
+    });
+    
+    requestAnimationFrame(animate);
+  };
+  animate();
+}
+
+function updateVideoCallStatus(state, text) {
+  const statusEl = document.getElementById('videoCallStatus');
+  const textEl = document.getElementById('videoCallStatusText');
+  
+  // Reuse voice-call-status classes for styling
+  statusEl.className = `video-call-status voice-call-status ${state}`;
+  textEl.textContent = text;
+}
+
+async function sendVideoCallData(audioFloat32) {
+  // Debounce to prevent duplicate sends
+  const now = Date.now();
+  if (now - lastVideoCallSendTime < VIDEO_CALL_DEBOUNCE_MS) {
+    log('Video call: Debounced duplicate send');
+    return;
+  }
+  lastVideoCallSendTime = now;
+  
+  if (!voiceWs || voiceWs.readyState !== WebSocket.OPEN) {
+    log('WebSocket not connected');
+    updateVideoCallStatus('listening', 'Not connected');
+    return;
+  }
+  
+  try {
+    // Capture frame from webcam
+    const video = document.getElementById('videoCallWebcam');
+    let imageBase64 = null;
+    
+    if (videoCallCameraOn && video.srcObject) {
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0);
+      imageBase64 = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+      log(`Captured frame: ${canvas.width}x${canvas.height}`);
+    }
+    
+    // Convert audio to WAV
+    const wavBlob = float32ToWav(audioFloat32, 16000);
+    const reader = new FileReader();
+    
+    reader.onload = async () => {
+      const audioBase64 = reader.result.split(',')[1];
+      
+      // Send video call data with both audio and image
+      const payload = {
+        type: 'video_call_data',
+        audio: audioBase64,
+        image: imageBase64,
+        format: 'wav'
+      };
+      
+      // Include custom prompt if set
+      if (videoCallCustomPrompt) {
+        payload.system_prompt = videoCallCustomPrompt;
+      }
+      
+      voiceWs.send(JSON.stringify(payload));
+      log('Sent video call data (audio + frame)');
+    };
+    reader.readAsDataURL(wavBlob);
+    
+  } catch (error) {
+    log(`Video call send error: ${error.message}`);
+    updateVideoCallStatus('listening', 'Error');
+  }
+}
+
+function toggleVideoCallMute() {
+  videoCallMuted = !videoCallMuted;
+  const btn = document.getElementById('videoCallMuteBtn');
+  
+  if (videoCallMuted) {
+    btn.classList.add('muted');
+    btn.textContent = '🔇';
+    updateVideoCallStatus('listening', 'Muted');
+  } else {
+    btn.classList.remove('muted');
+    btn.textContent = '🎤';
+    // Show appropriate status based on input mode
+    if (pttMode) {
+      updateVideoCallStatus('listening', 'Press SPACE or hold button to talk');
+    } else {
+      updateVideoCallStatus('listening', 'Listening...');
+    }
+  }
+}
+
+function toggleVideoCallCamera() {
+  videoCallCameraOn = !videoCallCameraOn;
+  const btn = document.getElementById('videoCallCameraBtn');
+  const status = document.getElementById('videoCallWebcamStatus');
+  const video = document.getElementById('videoCallWebcam');
+  
+  if (videoCallCameraOn) {
+    btn.classList.remove('off');
+    btn.textContent = '📷';
+    status.textContent = '📹 Camera On';
+    if (videoCallStream) {
+      videoCallStream.getVideoTracks().forEach(t => t.enabled = true);
+    }
+  } else {
+    btn.classList.add('off');
+    btn.textContent = '📷';
+    status.textContent = '📷 Camera Off';
+    if (videoCallStream) {
+      videoCallStream.getVideoTracks().forEach(t => t.enabled = false);
+    }
+  }
+}
+
+function endVideoCall() {
+  log('Ending video call mode');
+  teardownVideoCallMode();
+  
+  const wrapper = document.getElementById('videoChatWrapper');
+  const container = document.getElementById('videoCallContainer');
+  const textInputContainer = document.getElementById('textInputContainer');
+  const regularConversation = document.getElementById('conversationContainer');
+  const mainContent = document.querySelector('.main-content');
+  
+  // Hide video call wrapper, show regular conversation and text input
+  wrapper.classList.remove('active');
+  container.classList.remove('active');
+  if (mainContent) mainContent.classList.remove('video-call-expanded');
+  if (textInputContainer) textInputContainer.style.display = 'flex';
+  if (regularConversation) regularConversation.style.display = 'flex';
+  
+  if (currentChatId && chats[currentChatId]) {
+    chats[currentChatId].mode = 'text';
+    saveChatsToStorage();
+  }
+  
+  addMessage('system', '📹 Video call ended. Switched to text mode.');
+}
+
+function teardownVideoCallMode() {
+  videoCallActive = false;
+  
+  if (videoCallVadInstance) {
+    try {
+      videoCallVadInstance.pause();
+      videoCallVadInstance.destroy();
+    } catch (e) {}
+    videoCallVadInstance = null;
+  }
+  
+  if (videoCallStream) {
+    videoCallStream.getTracks().forEach(t => t.stop());
+    videoCallStream = null;
+  }
+  
+  // Cleanup PTT resources
+  cleanupPttAudio();
+  pttMode = false;
+  
+  const wrapper = document.getElementById('videoChatWrapper');
+  const container = document.getElementById('videoCallContainer');
+  const regularConversation = document.getElementById('conversationContainer');
+  const mainContent = document.querySelector('.main-content');
+  
+  if (wrapper) {
+    wrapper.classList.remove('active');
+    wrapper.style.display = '';
+    wrapper.style.flexDirection = '';
+    wrapper.style.gap = '';
+    wrapper.style.height = '';
+    wrapper.style.minHeight = '';
+  }
+  if (container) {
+    container.classList.remove('active');
+    container.style.flex = '';
+    container.style.width = '';
+    container.style.minWidth = '';
+    container.style.maxWidth = '';
+  }
+  const videoConversation = document.getElementById('videoConversationContainer');
+  if (videoConversation) {
+    videoConversation.style.flex = '';
+    videoConversation.style.minWidth = '';
+    videoConversation.style.display = '';
+    videoConversation.style.flexDirection = '';
+  }
+  if (mainContent) {
+    mainContent.classList.remove('video-call-expanded');
+    mainContent.style.maxWidth = '';
+  }
+  if (regularConversation) regularConversation.style.display = 'flex';
+  
+  const video = document.getElementById('videoCallWebcam');
+  if (video) video.srcObject = null;
+  
+  // Hide settings panel and PTT container
+  const settingsPanel = document.getElementById('videoCallSettingsPanel');
+  if (settingsPanel) settingsPanel.style.display = 'none';
+  
+  const pttContainer = document.getElementById('videoCallPttContainer');
+  if (pttContainer) pttContainer.style.display = 'none';
+  
+  // Reset waveform visibility
+  const waveform = document.getElementById('videoCallWaveform');
+  if (waveform) waveform.style.display = 'flex';
+  
+  log('Video call mode torn down');
+}
+
+function toggleVideoCallSettings() {
+  const panel = document.getElementById('videoCallSettingsPanel');
+  const promptInput = document.getElementById('videoCallSystemPrompt');
+  
+  if (panel.style.display === 'none') {
+    panel.style.display = 'block';
+    // Load current prompt
+    promptInput.value = videoCallCustomPrompt || DEFAULT_VIDEO_CALL_PROMPT;
+  } else {
+    panel.style.display = 'none';
+  }
+}
+
+function resetVideoCallPrompt() {
+  const promptInput = document.getElementById('videoCallSystemPrompt');
+  promptInput.value = DEFAULT_VIDEO_CALL_PROMPT;
+  videoCallCustomPrompt = null;
+  log('Video call prompt reset to default');
+}
+
+function saveVideoCallPrompt() {
+  const promptInput = document.getElementById('videoCallSystemPrompt');
+  const newPrompt = promptInput.value.trim();
+  
+  if (newPrompt && newPrompt !== DEFAULT_VIDEO_CALL_PROMPT) {
+    videoCallCustomPrompt = newPrompt;
+    log('Video call prompt saved');
+  } else {
+    videoCallCustomPrompt = null;
+    log('Using default video call prompt');
+  }
+  
+  // Hide settings panel
+  document.getElementById('videoCallSettingsPanel').style.display = 'none';
+}
+
+function toggleBargeIn(enabled) {
+  bargeInEnabled = enabled;
+  const statusEl = document.getElementById('bargeInStatus');
+  if (statusEl) {
+    statusEl.textContent = enabled ? 'ON' : 'OFF';
+    statusEl.style.color = enabled ? '#00b894' : '#636e72';
+  }
+  log(`Barge-in ${enabled ? 'enabled' : 'disabled'}`);
+}
+
+// ========================================
+// Push-to-Talk (PTT) Functions
+// ========================================
+
+function setInputMode(mode) {
+  const vadBtn = document.getElementById('vadModeBtn');
+  const pttBtn = document.getElementById('pttModeBtn');
+  const pttContainer = document.getElementById('videoCallPttContainer');
+  const waveform = document.getElementById('videoCallWaveform');
+  
+  if (mode === 'ptt') {
+    pttMode = true;
+    // Update button styles
+    vadBtn.style.background = 'transparent';
+    vadBtn.style.color = '#00b894';
+    vadBtn.style.fontWeight = 'normal';
+    pttBtn.style.background = '#00b894';
+    pttBtn.style.color = 'white';
+    pttBtn.style.fontWeight = 'bold';
+    
+    // Show PTT button, hide waveform
+    if (pttContainer) pttContainer.style.display = 'block';
+    if (waveform) waveform.style.display = 'none';
+    
+    // Pause VAD when in PTT mode
+    if (videoCallVadInstance) {
+      try {
+        videoCallVadInstance.pause();
+        log('VAD paused for PTT mode');
+      } catch (e) {}
+    }
+    
+    // Initialize PTT audio stream
+    initPttAudio();
+    
+    updateVideoCallStatus('listening', 'Press SPACE or hold button to talk');
+    log('Switched to PTT mode');
+  } else {
+    pttMode = false;
+    // Update button styles
+    vadBtn.style.background = '#00b894';
+    vadBtn.style.color = 'white';
+    vadBtn.style.fontWeight = 'bold';
+    pttBtn.style.background = 'transparent';
+    pttBtn.style.color = '#00b894';
+    pttBtn.style.fontWeight = 'normal';
+    
+    // Hide PTT button, show waveform
+    if (pttContainer) pttContainer.style.display = 'none';
+    if (waveform) waveform.style.display = 'flex';
+    
+    // Resume VAD when in VAD mode
+    if (videoCallVadInstance) {
+      try {
+        videoCallVadInstance.start();
+        log('VAD resumed');
+      } catch (e) {}
+    }
+    
+    // Cleanup PTT audio
+    cleanupPttAudio();
+    
+    updateVideoCallStatus('listening', 'Listening...');
+    log('Switched to VAD mode');
+  }
+}
+
+async function initPttAudio() {
+  try {
+    if (pttStream) return; // Already initialized
+    
+    pttStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: 16000,
+        echoCancellation: true,
+        noiseSuppression: true
+      }
+    });
+    
+    pttAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    log('PTT audio initialized');
+  } catch (err) {
+    log(`PTT audio init error: ${err.message}`);
+  }
+}
+
+function cleanupPttAudio() {
+  if (pttMediaRecorder && pttMediaRecorder.state !== 'inactive') {
+    pttMediaRecorder.stop();
+  }
+  pttMediaRecorder = null;
+  
+  if (pttStream) {
+    pttStream.getTracks().forEach(t => t.stop());
+    pttStream = null;
+  }
+  
+  if (pttAudioContext) {
+    pttAudioContext.close();
+    pttAudioContext = null;
+  }
+  
+  pttAudioChunks = [];
+  pttRecording = false;
+}
+
+async function startPttRecording() {
+  if (!pttMode || pttRecording || videoCallMuted) return;
+  
+  log('PTT: Starting recording');
+  pttRecording = true;
+  pttAudioChunks = [];
+  
+  // Visual feedback
+  const pttBtn = document.getElementById('videoCallPttBtn');
+  if (pttBtn) pttBtn.classList.add('recording');
+  updateVideoCallStatus('hearing', 'Recording...');
+  
+  // BARGE-IN: If TTS is playing and barge-in is enabled, stop it
+  if (isTtsPlaying && bargeInEnabled) {
+    log('PTT: Barge-in triggered - stopping TTS');
+    stopTtsPlayback();
+  }
+  
+  try {
+    if (!pttStream) {
+      await initPttAudio();
+    }
+    
+    // Create MediaRecorder with WAV-compatible format
+    const options = { mimeType: 'audio/webm;codecs=opus' };
+    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+      // Fallback
+      options.mimeType = 'audio/webm';
+    }
+    
+    pttMediaRecorder = new MediaRecorder(pttStream, options);
+    
+    pttMediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) {
+        pttAudioChunks.push(e.data);
+      }
+    };
+    
+    pttMediaRecorder.onstop = async () => {
+      if (pttAudioChunks.length === 0) {
+        log('PTT: No audio recorded');
+        return;
+      }
+      
+      log('PTT: Processing recorded audio...');
+      updateVideoCallStatus('processing', 'Looking & thinking...');
+      
+      // Convert to blob and then to Float32Array for consistency with VAD
+      const audioBlob = new Blob(pttAudioChunks, { type: 'audio/webm' });
+      await processPttAudio(audioBlob);
+    };
+    
+    pttMediaRecorder.start(100); // Collect data every 100ms
+    
+  } catch (err) {
+    log(`PTT recording error: ${err.message}`);
+    pttRecording = false;
+    const pttBtn = document.getElementById('videoCallPttBtn');
+    if (pttBtn) pttBtn.classList.remove('recording');
+    updateVideoCallStatus('listening', 'Recording error');
+  }
+}
+
+function stopPttRecording() {
+  if (!pttMode || !pttRecording) return;
+  
+  log('PTT: Stopping recording');
+  pttRecording = false;
+  
+  // Visual feedback
+  const pttBtn = document.getElementById('videoCallPttBtn');
+  if (pttBtn) pttBtn.classList.remove('recording');
+  
+  // Stop the recorder (this triggers onstop which processes the audio)
+  if (pttMediaRecorder && pttMediaRecorder.state !== 'inactive') {
+    pttMediaRecorder.stop();
+  }
+}
+
+async function processPttAudio(audioBlob) {
+  try {
+    // Decode the webm audio to Float32Array
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    
+    // Get the audio data as Float32Array
+    const channelData = audioBuffer.getChannelData(0);
+    
+    // Resample to 16kHz if needed
+    let audioFloat32;
+    if (audioBuffer.sampleRate !== 16000) {
+      const ratio = 16000 / audioBuffer.sampleRate;
+      const newLength = Math.round(channelData.length * ratio);
+      audioFloat32 = new Float32Array(newLength);
+      
+      for (let i = 0; i < newLength; i++) {
+        const srcIndex = i / ratio;
+        const srcIndexFloor = Math.floor(srcIndex);
+        const srcIndexCeil = Math.min(srcIndexFloor + 1, channelData.length - 1);
+        const t = srcIndex - srcIndexFloor;
+        audioFloat32[i] = channelData[srcIndexFloor] * (1 - t) + channelData[srcIndexCeil] * t;
+      }
+    } else {
+      audioFloat32 = channelData;
+    }
+    
+    await audioContext.close();
+    
+    // Send using the existing video call data function
+    sendVideoCallData(audioFloat32);
+    
+  } catch (err) {
+    log(`PTT audio processing error: ${err.message}`);
+    updateVideoCallStatus('listening', 'Press SPACE or hold button to talk');
+  }
+}
+
+// Keyboard handling for PTT
+let pttKeyDown = false;  // Track if PTT key is currently held down
+
+function setupPttKeyboardHandlers() {
+  document.addEventListener('keydown', (e) => {
+    // Only handle Space key when in PTT mode and video call is active
+    // IMPORTANT: Check e.repeat to ignore key repeat events (held key)
+    if (e.code === 'Space' && pttMode && videoCallActive && !pttRecording && !e.repeat && !pttKeyDown) {
+      // Prevent default space behavior (scrolling, etc)
+      e.preventDefault();
+      pttKeyDown = true;
+      startPttRecording();
+    }
+  });
+  
+  document.addEventListener('keyup', (e) => {
+    if (e.code === 'Space' && pttMode && videoCallActive) {
+      e.preventDefault();
+      pttKeyDown = false;
+      if (pttRecording) {
+        stopPttRecording();
+      }
+    }
+  });
+  
+  // Handle window blur - stop recording if user switches away while holding key
+  window.addEventListener('blur', () => {
+    if (pttKeyDown && pttRecording) {
+      log('PTT: Window lost focus, stopping recording');
+      pttKeyDown = false;
+      stopPttRecording();
+    }
+  });
+  
+  log('PTT keyboard handlers initialized');
+}
+
+// Initialize PTT keyboard handlers on page load
+document.addEventListener('DOMContentLoaded', setupPttKeyboardHandlers);
+
+function stopTtsPlayback() {
+  log(`stopTtsPlayback called - active sources: ${activeAudioSources.length}, masterGain: ${masterGainNode ? 'exists' : 'null'}`);
+  
+  // Set abort flag to block any incoming audio chunks
+  ttsAborted = true;
+  
+  // INSTANT MUTE via gain node
+  if (masterGainNode && audioContext) {
+    masterGainNode.gain.setValueAtTime(0, audioContext.currentTime);
+    log('Master gain set to 0 (instant mute)');
+  }
+  
+  // Stop all active audio sources
+  if (activeAudioSources.length > 0) {
+    log(`Stopping ${activeAudioSources.length} active audio sources`);
+    activeAudioSources.forEach(source => {
+      try {
+        source.stop();
+        source.disconnect();
+      } catch (e) {
+        // Source may have already ended
+      }
+    });
+    activeAudioSources = [];
+  }
+  
+  // Reset playback timing
+  nextPlayTime = null;
+  
+  // Tell server to abort TTS
+  if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+    voiceWs.send(JSON.stringify({ type: 'abort_tts' }));
+    log('Sent abort_tts to server');
+  }
+  
+  isTtsPlaying = false;
+  log('TTS playback stopped (barge-in complete)');
+}
+
+async function setupVisionMode(template) {
+  // Prevent double initialization
+  if (visionModeActive && visionStream) {
+    log('Vision mode already active');
+    return;
+  }
+  
+  visionModeActive = true;
+  
+  // Create webcam container if it doesn't exist
+  let container = document.getElementById('visionWebcamContainer');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'visionWebcamContainer';
+    container.className = 'vision-webcam-container';
+    // Check if polling mode
+    const isPollingMode = template === 'polling';
+    
+    container.innerHTML = `
+      <video id="visionVideo" autoplay playsinline muted></video>
+      <canvas id="visionCanvas"></canvas>
+      <div class="vision-webcam-controls">
+        <div class="vision-controls-row">
+          ${isPollingMode ? '' : '<button class="vision-capture-btn" onclick="captureAndAnalyze()">📸 Capture & Ask</button>'}
+          <button class="vision-capture-btn" onclick="toggleVisionMode()">❌ Close</button>
+        </div>
+        ${isPollingMode ? `
+        <div class="vision-continuous-controls">
+          <input type="checkbox" id="continuousCapture" onchange="toggleContinuousCapture()" checked>
+          <label for="continuousCapture">Auto</label>
+          <input type="range" id="captureFrequency" min="1" max="10" value="3" onchange="updateCaptureFrequency()">
+          <span class="freq-display" id="freqDisplay">3s</span>
+          <span class="vision-continuous-indicator active" id="continuousIndicator">● LIVE</span>
+        </div>
+        ` : `
+        <div class="vision-continuous-controls" style="background: rgba(0,0,0,0.5);">
+          <span style="color: #adb5bd; font-size: 0.75rem;">📷 Camera active - ask a question about what you see</span>
+        </div>
+        `}
+      </div>
+    `;
+    
+    // Auto-start polling for polling mode
+    if (isPollingMode) {
+      setTimeout(() => startContinuousCapture(), 500);
+    }
+    
+    // Insert after connection status
+    const connectionStatus = document.getElementById('connectionStatus');
+    connectionStatus.parentNode.insertBefore(container, connectionStatus.nextSibling);
+  }
+  
+  container.style.display = 'block';
+  visionVideo = document.getElementById('visionVideo');
+  visionCanvas = document.getElementById('visionCanvas');
+  
+  try {
+    // Stop any existing stream first
+    if (visionStream) {
+      visionStream.getTracks().forEach(track => track.stop());
+      visionStream = null;
+    }
+    
+    visionStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: false
+    });
+    
+    // Set srcObject and wait for it to be ready
+    visionVideo.srcObject = visionStream;
+    
+    // Wait for video to be ready before playing
+    await new Promise((resolve, reject) => {
+      // Check if already has metadata
+      if (visionVideo.readyState >= 1) {
+        visionCanvas.width = visionVideo.videoWidth || 640;
+        visionCanvas.height = visionVideo.videoHeight || 480;
+        resolve();
+        return;
+      }
+      
+      const onReady = () => {
+        visionVideo.removeEventListener('loadedmetadata', onReady);
+        visionVideo.removeEventListener('canplay', onReady);
+        // Set canvas size from actual video dimensions
+        visionCanvas.width = visionVideo.videoWidth || 640;
+        visionCanvas.height = visionVideo.videoHeight || 480;
+        resolve();
+      };
+      
+      visionVideo.addEventListener('loadedmetadata', onReady);
+      visionVideo.addEventListener('canplay', onReady);
+      visionVideo.onerror = (e) => reject(new Error('Video error: ' + e.message));
+      
+      // Timeout after 10 seconds
+      setTimeout(() => {
+        visionVideo.removeEventListener('loadedmetadata', onReady);
+        visionVideo.removeEventListener('canplay', onReady);
+        // If we have a stream, resolve anyway
+        if (visionStream && visionStream.active) {
+          visionCanvas.width = 640;
+          visionCanvas.height = 480;
+          resolve();
+        } else {
+          reject(new Error('Video load timeout'));
+        }
+      }, 10000);
+    });
+    
+    // Video should autoplay due to autoplay attribute, but try play() just in case
+    try {
+      await visionVideo.play();
+    } catch (playErr) {
+      // Ignore play errors - autoplay should handle it
+      console.log('Play hint ignored (autoplay active):', playErr.message);
+    }
+    
+    log('Vision mode activated');
+  } catch (err) {
+    console.error('Vision mode error:', err);
+    alert('Could not access camera: ' + err.message);
+    teardownVisionMode();
+  }
+}
+
+function teardownVisionMode() {
+  visionModeActive = false;
+  
+  // Stop continuous capture if active
+  stopContinuousCapture();
+  
+  // Reset checkbox state
+  const checkbox = document.getElementById('continuousCapture');
+  if (checkbox) checkbox.checked = false;
+  const indicator = document.getElementById('continuousIndicator');
+  if (indicator) indicator.classList.remove('active');
+  
+  // Stop all tracks
+  if (visionStream) {
+    visionStream.getTracks().forEach(track => track.stop());
+    visionStream = null;
+  }
+  
+  // Clear video source
+  if (visionVideo) {
+    visionVideo.srcObject = null;
+  }
+  
+  const container = document.getElementById('visionWebcamContainer');
+  if (container) {
+    container.style.display = 'none';
+  }
+  
+  log('Vision mode deactivated');
+}
+
+function toggleVisionMode() {
+  if (visionModeActive) {
+    teardownVisionMode();
+  } else if (chats[currentChatId]?.mode === 'vision') {
+    setupVisionMode(chats[currentChatId]?.template);
+  }
+}
+
+function captureFrame() {
+  if (!visionVideo || !visionCanvas || !visionModeActive) return null;
+  
+  const ctx = visionCanvas.getContext('2d');
+  ctx.drawImage(visionVideo, 0, 0, visionCanvas.width, visionCanvas.height);
+  
+  // Get base64 JPEG (lower quality for speed)
+  return visionCanvas.toDataURL('image/jpeg', 0.7).split(',')[1];
+}
+
+async function captureAndAnalyze(customPrompt = null) {
+  if (!visionModeActive) {
+    alert('Camera not active');
+    return;
+  }
+  
+  const imageBase64 = captureFrame();
+  if (!imageBase64) {
+    alert('Failed to capture frame');
+    return;
+  }
+  
+  // Get prompt from text input or custom prompt or default
+  const textInput = document.getElementById('textInput');
+  let prompt = customPrompt || textInput?.value?.trim() || '';
+  
+  // If no prompt provided, show hint
+  if (!prompt) {
+    prompt = 'What do you see?';
+  }
+  
+  // Clear input
+  if (textInput && !customPrompt) textInput.value = '';
+  
+  // Add user message with image indicator
+  addMessage('user', `📷 ${prompt}`);
+  
+  // Show analyzing indicator
+  const analyzingMsg = addMessage('assistant', '🔄 Looking at camera...');
+  
+  try {
+    // Get template for this chat
+    const chat = chats[currentChatId];
+    const template = chat?.template || 'general';
+    
+    // Send to vision API with tools enabled
+    const response = await fetch('/api/vision/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image: imageBase64,
+        prompt: prompt,  // Send just the user's question, not the prepended context
+        enable_tools: true,
+        tools: ['coding_assistant', 'markdown_assistant', 'html_assistant'],
+        template: template  // Backend will use template-specific system prompt
+      })
+    });
+    
+    const data = await response.json();
+    
+    // Remove analyzing message
+    if (analyzingMsg) analyzingMsg.remove();
+    
+    if (data.success) {
+      // Check for tool calls
+      if (data.tool_calls && data.tool_calls.length > 0) {
+        console.log('[Vision] Tool calls received:', data.tool_calls);
+        
+        for (const tc of data.tool_calls) {
+          const toolName = tc.tool;
+          const toolResult = tc.result;
+          
+          try {
+            const resultData = JSON.parse(toolResult);
+            
+            if (toolName === 'coding_assistant' && (resultData.agent_type === 'coding_assistant' || resultData.status === 'initiated')) {
+              // Open code editor modal
+              addMessage('assistant', `🤖 Opening coding assistant for: ${resultData.task}`);
+              openAgentCodeEditor('coding_assistant', resultData.task);
+              
+              // Trigger the agent via WebSocket
+              if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+                voiceWs.send(JSON.stringify({
+                  type: 'execute_agent',
+                  agent: 'coding_assistant',
+                  task: resultData.task,
+                  codebase_path: resultData.codebase_path || ''
+                }));
+              } else {
+                // WebSocket not connected - show message
+                addMessage('assistant', '⚠️ Connect to voice server to execute coding agent');
+              }
+            } else if (toolName === 'markdown_assistant' && (resultData.agent_type === 'markdown_assistant' || resultData.status === 'initiated')) {
+              // Open markdown editor modal
+              addMessage('assistant', `📝 Opening markdown assistant for: ${resultData.task}`);
+              openMarkdownEditor(resultData.task);
+              
+              // Trigger the agent via WebSocket
+              if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+                voiceWs.send(JSON.stringify({
+                  type: 'execute_agent',
+                  agent: 'markdown_assistant',
+                  task: resultData.task,
+                  context: resultData.context || ''
+                }));
+              } else {
+                // WebSocket not connected - trigger via HTTP or show message
+                addMessage('assistant', '⚠️ Connect to voice server to execute markdown agent');
+              }
+            } else if (toolName === 'html_assistant' && (resultData.agent_type === 'html_assistant' || resultData.status === 'initiated')) {
+              // Open HTML editor modal
+              addMessage('assistant', `🌐 Opening HTML assistant for: ${resultData.task}`);
+              openHtmlEditor(resultData.task);
+              
+              // Trigger the agent via WebSocket
+              if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+                voiceWs.send(JSON.stringify({
+                  type: 'execute_agent',
+                  agent: 'html_assistant',
+                  task: resultData.task,
+                  context: resultData.context || ''
+                }));
+              } else {
+                addMessage('assistant', '⚠️ Connect to voice server to execute HTML agent');
+              }
+            } else {
+              // Other tool result
+              addMessage('assistant', `Tool ${toolName}: ${toolResult}`);
+            }
+          } catch (parseErr) {
+            addMessage('assistant', `Tool ${toolName}: ${toolResult}`);
+          }
+        }
+        
+        // Also show text response if any
+        if (data.response) {
+          addMessage('assistant', data.response);
+        }
+      } else {
+        // Regular text response
+        addMessage('assistant', data.response);
+        
+        // Speak the response if connected
+        if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+          voiceWs.send(JSON.stringify({
+            type: 'tts_request',
+            text: data.response
+          }));
+        } else {
+          console.log('[Vision] TTS unavailable - WebSocket not connected.');
+        }
+      }
+    } else {
+      addMessage('assistant', '❌ Error: ' + (data.error || 'Unknown error'));
+    }
+  } catch (err) {
+    console.error('Vision analysis error:', err);
+    if (analyzingMsg) analyzingMsg.remove();
+    addMessage('assistant', '❌ Failed to analyze image: ' + err.message);
+  }
+  
+  // Save chat
+  saveCurrentChat();
+}
+
+// Handle sending text message in vision mode
+async function sendVisionMessage() {
+  const textInput = document.getElementById('textInput');
+  const text = textInput?.value?.trim();
+  
+  if (!text) return;
+  
+  // In vision mode, capture frame and send with question
+  if (visionModeActive) {
+    const chat = chats[currentChatId];
+    const template = chat?.template;
+    
+    // For polling mode, just add to chat (VLM is auto-describing)
+    if (template === 'polling') {
+      addMessage('user', text);
+      textInput.value = '';
+      // Still capture and answer the question
+      await captureAndAnalyze(text);
+    } else {
+      // For interactive mode, capture frame with the question
+      await captureAndAnalyze(text);
+    }
+  }
+}
+
+// =============================================
+// Continuous Capture Mode
+// =============================================
+
+let continuousCaptureInterval = null;
+let continuousCaptureFrequency = 3; // seconds
+let isAnalyzingContinuous = false;
+
+function toggleContinuousCapture() {
+  const checkbox = document.getElementById('continuousCapture');
+  const indicator = document.getElementById('continuousIndicator');
+  
+  if (checkbox && checkbox.checked) {
+    startContinuousCapture();
+    if (indicator) indicator.classList.add('active');
+  } else {
+    stopContinuousCapture();
+    if (indicator) indicator.classList.remove('active');
+  }
+}
+
+function updateCaptureFrequency() {
+  const slider = document.getElementById('captureFrequency');
+  const display = document.getElementById('freqDisplay');
+  
+  if (slider) {
+    continuousCaptureFrequency = parseInt(slider.value);
+    if (display) display.textContent = continuousCaptureFrequency + 's';
+    
+    // Restart continuous capture with new frequency if active
+    const checkbox = document.getElementById('continuousCapture');
+    if (checkbox && checkbox.checked) {
+      stopContinuousCapture();
+      startContinuousCapture();
+    }
+  }
+}
+
+function startContinuousCapture() {
+  if (continuousCaptureInterval) {
+    clearInterval(continuousCaptureInterval);
+  }
+  
+  log(`Starting continuous capture every ${continuousCaptureFrequency}s`);
+  
+  // Capture immediately
+  continuousCaptureOnce();
+  
+  // Then at interval
+  continuousCaptureInterval = setInterval(() => {
+    continuousCaptureOnce();
+  }, continuousCaptureFrequency * 1000);
+}
+
+function stopContinuousCapture() {
+  if (continuousCaptureInterval) {
+    clearInterval(continuousCaptureInterval);
+    continuousCaptureInterval = null;
+    log('Stopped continuous capture');
+  }
+}
+
+async function continuousCaptureOnce() {
+  // Skip if already analyzing or vision mode not active
+  if (isAnalyzingContinuous || !visionModeActive) {
+    return;
+  }
+  
+  isAnalyzingContinuous = true;
+  
+  try {
+    const imageBase64 = captureFrame();
+    if (!imageBase64) {
+      console.warn('Failed to capture frame for continuous mode');
+      return;
+    }
+    
+    // Get the current prompt or use template-specific default
+    const chat = chats[currentChatId];
+    const template = chat?.template;
+    let prompt = 'What do you see? Be brief.';
+    
+    if (template === 'fashion') {
+      prompt = 'Briefly describe the clothing or outfit you see. Any style suggestions?';
+    } else if (template === 'whiteboard') {
+      prompt = 'What text, diagrams, or content do you see on the board? Summarize briefly.';
+    } else if (template === 'notes') {
+      prompt = 'What notes or text do you see? Extract key items briefly.';
+    }
+    
+    // Check if there's custom prompt in text input
+    const textInput = document.getElementById('textInput');
+    if (textInput?.value?.trim()) {
+      prompt = textInput.value.trim();
+    }
+    
+    // Add subtle indicator (don't clutter chat with every capture)
+    const timestamp = new Date().toLocaleTimeString();
+    console.log(`[Continuous] Analyzing frame at ${timestamp}`);
+    
+    // Show brief analyzing indicator
+    const indicator = document.getElementById('continuousIndicator');
+    if (indicator) {
+      indicator.textContent = '● ANALYZING...';
+      indicator.style.color = '#f39c12';
+    }
+    
+    const response = await fetch('/api/vision/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image: imageBase64,
+        prompt: prompt
+      })
+    });
+    
+    const data = await response.json();
+    
+    if (indicator) {
+      indicator.textContent = '● LIVE';
+      indicator.style.color = '#2ecc71';
+    }
+    
+    if (data.success && data.response) {
+      // Add to chat
+      addMessage('assistant', `🔄 ${data.response}`);
+      
+      // Optionally speak (can be noisy, so only for important detections)
+      // Uncomment below to enable TTS for continuous mode
+      // if (ws && ws.readyState === WebSocket.OPEN) {
+      //   ws.send(JSON.stringify({ type: 'tts_request', text: data.response }));
+      // }
+      
+      saveCurrentChat();
+    }
+    
+  } catch (err) {
+    console.error('Continuous capture error:', err);
+  } finally {
+    isAnalyzingContinuous = false;
+  }
+}
+
+function addMessage(role, content) {
+  // Remove empty state if present
+  const emptyState = conversationEl.querySelector('.empty-state');
+  if (emptyState) emptyState.remove();
+  
+  const msgDiv = document.createElement('div');
+  msgDiv.className = `message ${role === 'user' ? 'user-message' : 'assistant-message'}`;
+  
+  const contentDiv = document.createElement('div');
+  contentDiv.className = 'message-content';
+  contentDiv.textContent = content;
+  
+  msgDiv.appendChild(contentDiv);
+  conversationEl.appendChild(msgDiv);
+  conversationEl.scrollTop = conversationEl.scrollHeight;
+  
+  return msgDiv;
+}
+
+// Override createNewChat to open modal instead
+function createNewChat() {
+  openChatModeModal();
+}
+
+function saveCurrentChat() {
+  if (!currentChatId) return;
+  
+  // Extract messages from conversation UI
+  const messages = [];
+  const messageElements = conversationEl.querySelectorAll('.message');
+  
+  messageElements.forEach(msgEl => {
+    const role = msgEl.classList.contains('user-message') ? 'user' : 'assistant';
+    const contentEl = msgEl.querySelector('.message-content');
+    if (contentEl) {
+      // Check if this is a code message (has code block)
+      const codeBlock = contentEl.querySelector('pre');
+      if (codeBlock) {
+        // Extract task and code
+        const taskDiv = contentEl.querySelector('div');
+        const task = taskDiv ? taskDiv.textContent.replace('Task: ', '') : '';
+        const code = codeBlock.textContent.trim();
+        // Store as formatted message
+        messages.push({ 
+          role, 
+          content: `🤖 Coding Assistant\nTask: ${task}\n\n\`\`\`python\n${code}\n\`\`\`` 
+        });
+      } else {
+        const text = contentEl.textContent.trim();
+        if (text) {
+          messages.push({ role, content: text });
+        }
+      }
+    }
+  });
+  
+  // Update chat
+  if (chats[currentChatId]) {
+    chats[currentChatId].messages = messages;
+    // Update title and preview
+    const firstUserMsg = messages.find(m => m.role === 'user');
+    if (firstUserMsg) {
+      chats[currentChatId].title = firstUserMsg.content.substring(0, 50) + (firstUserMsg.content.length > 50 ? '...' : '');
+      chats[currentChatId].preview = firstUserMsg.content.substring(0, 100);
+    }
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg && lastMsg.role === 'assistant') {
+      chats[currentChatId].preview = lastMsg.content.substring(0, 100);
+    }
+    chats[currentChatId].timestamp = new Date().toISOString();
+  }
+  
+  saveChatsToStorage();
+  renderChatList();
+}
+
+function renderChatList() {
+  if (!chatListEl) return;
+  
+  // Sort chats by timestamp (newest first)
+  const sortedChats = Object.values(chats).sort((a, b) => 
+    new Date(b.timestamp) - new Date(a.timestamp)
+  );
+  
+  chatListEl.innerHTML = '';
+  
+  sortedChats.forEach(chat => {
+    const chatItem = document.createElement('div');
+    chatItem.className = 'chat-item' + (chat.id === currentChatId ? ' active' : '');
+    chatItem.onclick = () => loadChat(chat.id);
+    
+    const time = new Date(chat.timestamp);
+    const timeStr = time.toLocaleDateString() + ' ' + time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    
+    // Get vision mode badge if applicable
+    let modeBadge = '';
+    if (chat.mode === 'vision') {
+      const template = chat.template && VISION_TEMPLATES[chat.template];
+      const icon = template ? template.icon : '📷';
+      modeBadge = `<span class="vision-mode-badge">${icon}</span> `;
+    }
+    
+    chatItem.innerHTML = `
+      <div class="chat-item-title">${modeBadge}${escapeHtml(chat.title || 'New Chat')}</div>
+      <div class="chat-item-preview">${escapeHtml(chat.preview || 'No messages yet')}</div>
+      <div class="chat-item-time">${timeStr}</div>
+    `;
+    
+    chatListEl.appendChild(chatItem);
+  });
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function loadChat(chatId) {
+  // Save current chat first
+  if (currentChatId && chats[currentChatId] && currentChatId !== chatId) {
+    saveCurrentChat();
+  }
+  
+  // Teardown any active modes from previous chat
+  teardownVisionMode();
+  teardownVoiceCallMode();
+  teardownVideoCallMode();
+  
+  // Disconnect if connected
+  if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+    isManualDisconnect = true;
+    voiceWs.send(JSON.stringify({ type: "disconnect" }));
+    voiceWs.close();
+    voiceWs = null;
+  }
+  
+  currentChatId = chatId;
+  renderChatList();
+  
+  // Clear conversation UI
+  conversationEl.innerHTML = '<div class="empty-state">Connect and start a conversation</div>';
+  currentTransientMsg = null;
+  
+  // Hide/show text input based on mode
+  const textInputContainer = document.getElementById('textInputContainer');
+  
+  // Load messages from chat
+  const chat = chats[chatId];
+  if (chat && chat.messages && chat.messages.length > 0) {
+    conversationEl.innerHTML = '';
+    chat.messages.forEach(msg => {
+      // Check if this is a code message (contains code block markers)
+      if (msg.content.includes('🤖 Coding Assistant') && msg.content.includes('```python')) {
+        // Extract task and code from the stored format
+        const taskMatch = msg.content.match(/Task: (.+?)\n/);
+        const codeMatch = msg.content.match(/```python\n([\s\S]+?)\n```/);
+        const task = taskMatch ? taskMatch[1] : '';
+        const code = codeMatch ? codeMatch[1] : '';
+        const hasExecution = msg.content.includes('sandbox');
+        if (code) {
+          const codeMsg = createCodeMessageElement(task, code, hasExecution);
+          conversationEl.appendChild(codeMsg.container);
+        } else {
+          // Fallback to regular message if parsing fails
+          const msgEl = createMessageElement(msg.role, msg.content);
+          conversationEl.appendChild(msgEl.container);
+        }
+      } else {
+        const msgEl = createMessageElement(msg.role, msg.content);
+        conversationEl.appendChild(msgEl.container);
+      }
+    });
+    scrollToBottom();
+  } else if (chat && chat.mode === 'vision') {
+    // Show vision mode empty state
+    const template = chat.template && VISION_TEMPLATES[chat.template];
+    if (template) {
+      let modeHint = template.mode === 'polling' 
+        ? 'Auto-describing what the camera sees every few seconds.'
+        : 'Ask questions about what you see - type or speak your question.';
+      conversationEl.innerHTML = `<div class="empty-state">
+        <span class="vision-mode-badge">${template.icon} ${template.name}</span>
+        <br><br>${modeHint}
+      </div>`;
+    } else {
+      conversationEl.innerHTML = '<div class="empty-state"><span class="vision-mode-badge">📷 Vision Chat</span><br><br>Ask questions about what you see.</div>';
+    }
+  } else if (chat && chat.mode === 'call') {
+    // Show voice call mode empty state
+    conversationEl.innerHTML = `<div class="empty-state">
+      <span class="call-mode-badge">📞 Voice Call</span>
+      <br><br>Just start talking - Spark will listen and respond automatically.
+    </div>`;
+  } else if (chat && chat.mode === 'video') {
+    // Show video call mode empty state
+    conversationEl.innerHTML = `<div class="empty-state">
+      <span class="video-call-mode-badge">📹 Video Call</span>
+      <br><br>Show and ask - Spark sees what you show and hears what you say.
+    </div>`;
+  }
+  
+  // Setup mode-specific UI
+  if (chat && chat.mode === 'vision') {
+    setupVisionMode(chat.template);
+    if (textInputContainer) textInputContainer.style.display = 'flex';
+  } else if (chat && chat.mode === 'call') {
+    setupVoiceCallMode();
+    if (textInputContainer) textInputContainer.style.display = 'none';
+  } else if (chat && chat.mode === 'video') {
+    console.log('🎥 [LoadChat] Video mode detected, calling setupVideoCallMode()');
+    setupVideoCallMode();
+    if (textInputContainer) textInputContainer.style.display = 'none';
+  } else {
+    if (textInputContainer) textInputContainer.style.display = 'flex';
+  }
+  
+  // Update system prompt display based on mode
+  updateSystemPromptDisplay(chat);
+  
+  log(`Loaded chat: ${chatId}${chat?.mode === 'vision' ? ' (vision mode)' : chat?.mode === 'call' ? ' (voice call mode)' : ''}`);
+}
+
+function updateSystemPromptDisplay(chat) {
+  const systemPromptInput = document.getElementById('systemPromptInput');
+  const systemPromptMode = document.getElementById('systemPromptMode');
+  
+  if (!systemPromptInput) return;
+  
+  if (chat && chat.mode === 'vision') {
+    // Vision mode - show template-specific prompt
+    const template = chat.template || 'general';
+    const templateInfo = VISION_TEMPLATES[template];
+    
+    if (templateInfo) {
+      systemPromptInput.value = templateInfo.systemPrompt;
+      systemPromptInput.style.backgroundColor = '#f0f7ff';  // Light blue tint
+      systemPromptInput.disabled = true;  // Read-only for vision templates
+      
+      if (systemPromptMode) {
+        systemPromptMode.textContent = `(📷 ${templateInfo.name} - Read Only)`;
+        systemPromptMode.style.color = '#3498db';
+      }
+    }
+  } else {
+    // Text mode - show editable prompt
+    systemPromptInput.style.backgroundColor = '';
+    // Only enable if disconnected
+    const isConnected = voiceWs && voiceWs.readyState === WebSocket.OPEN;
+    systemPromptInput.disabled = isConnected;
+    
+    if (systemPromptMode) {
+      systemPromptMode.textContent = isConnected ? '(Connected - Read Only)' : '(Editable)';
+      systemPromptMode.style.color = '#7f8c8d';
+    }
+  }
+}
+
+function scrollToBottom() {
+  // Use multiple methods to ensure scroll works
+  const doScroll = () => {
+    const activeEl = getActiveConversationEl();
+    if (activeEl) {
+      // Force scroll to bottom
+      activeEl.scrollTop = activeEl.scrollHeight;
+      
+      // Also try scrollIntoView on last child
+      const lastChild = activeEl.lastElementChild;
+      if (lastChild) {
+        lastChild.scrollIntoView({ behavior: 'smooth', block: 'end' });
+      }
+    }
+    
+    // Also scroll the regular conversationEl just in case
+    if (conversationEl && conversationEl !== activeEl) {
+      conversationEl.scrollTop = conversationEl.scrollHeight;
+    }
+  };
+  
+  // Call immediately
+  doScroll();
+  
+  // Also call after a short delay to handle any rendering delays
+  requestAnimationFrame(doScroll);
+  setTimeout(doScroll, 100);
+  setTimeout(doScroll, 300);
+}
+
+function log(msg) {
+  const timestamp = new Date().toLocaleTimeString();
+  console.log(`[${timestamp}]`, msg);
+  if (logEl) {
+    logEl.textContent += `[${timestamp}] ${msg}\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+}
+
+function toggleLog() {
+  logEl.classList.toggle("visible");
+}
+
+function toggleConfig() {
+  const configContent = document.getElementById("configContent");
+  const configSection = document.querySelector(".config-section");
+  const isVisible = configContent.style.display !== "none";
+  
+  configContent.style.display = isVisible ? "none" : "block";
+  configSection.classList.toggle("expanded", !isVisible);
+}
+
+function setConnectionStatus(status) {
+  connectionStatusEl.className = `connection-status ${status}`;
+  const dot = connectionStatusEl.querySelector(".status-dot");
+  dot.className = `status-dot ${status}`;
+  
+  const statusText = {
+    connected: "Connected",
+    disconnected: "Disconnected",
+    connecting: "Connecting..."
+  };
+  connectionStatusEl.querySelector("span:last-child").textContent = statusText[status];
+  
+  // Enable/disable system prompt editing and update disconnect button text based on connection status
+  if (status === "connected") {
+    systemPromptInput.disabled = true;
+    disconnectBtn.textContent = "Disconnect";
+    disconnectBtn.disabled = false;
+    disconnectBtn.classList.remove("connect-state");
+  } else if (status === "connecting") {
+    // Keep prompt disabled while connecting
+    systemPromptInput.disabled = true;
+    disconnectBtn.textContent = "Connecting...";
+    disconnectBtn.disabled = true;
+  } else {
+    // Disconnected
+    systemPromptInput.disabled = false;
+    disconnectBtn.textContent = "Connect";
+    disconnectBtn.disabled = false;
+    disconnectBtn.classList.add("connect-state");
+  }
+  
+  // Update text input state
+  updateTextInputState();
+}
+
+function sendTextMessage() {
+  if (!textInput || !textInput.value.trim()) {
+    return;
+  }
+  
+  const messageText = textInput.value.trim();
+  
+  // Check if we're in vision mode (interactive)
+  const chat = chats[currentChatId];
+  if (chat?.mode === 'vision' && visionModeActive && chat?.template !== 'polling') {
+    // In interactive vision mode - capture frame and answer question
+    textInput.value = '';
+    textInput.style.height = 'auto';
+    captureAndAnalyze(messageText);
+    return;
+  }
+  
+  // Regular text chat mode
+  if (!voiceWs || voiceWs.readyState !== WebSocket.OPEN) {
+    alert("Please connect first before sending messages");
+    return;
+  }
+  
+  // Clear input
+  textInput.value = '';
+  textInput.style.height = 'auto';
+  
+  // Remove empty state
+  removeEmptyState();
+  
+  // Create user message in UI
+  const userMsg = createMessageElement("user", messageText);
+  conversationEl.appendChild(userMsg.container);
+  scrollToBottom();
+  
+  // Save chat after user message
+  saveCurrentChat();
+  
+  // Send to server
+  voiceWs.send(JSON.stringify({
+    type: "text_message",
+    text: messageText
+  }));
+  
+  log(`Sent text message: "${messageText}"`);
+}
+
+function updateTextInputState() {
+  if (textInput && sendTextBtn) {
+    const isConnected = voiceWs && voiceWs.readyState === WebSocket.OPEN;
+    textInput.disabled = !isConnected;
+    sendTextBtn.disabled = !isConnected;
+  }
+}
+
+function removeEmptyState() {
+  const activeEl = getActiveConversationEl();
+  const emptyState = activeEl.querySelector(".empty-state");
+  if (emptyState) {
+    emptyState.remove();
+  }
+}
+
+function createMessageElement(role, content = "", isTransient = false) {
+  const messageDiv = document.createElement("div");
+  messageDiv.className = `message message-${isTransient ? 'transient' : role}`;
+  
+  const header = document.createElement("div");
+  header.className = "message-header";
+  header.textContent = isTransient ? "Assistant (thinking...)" : (role === "user" ? "You" : "Assistant");
+  
+  const contentDiv = document.createElement("div");
+  contentDiv.className = "message-content";
+  contentDiv.textContent = content;
+  
+  messageDiv.appendChild(header);
+  messageDiv.appendChild(contentDiv);
+  
+  return { container: messageDiv, content: contentDiv };
+}
+
+function createCodeMessageElement(task, code, hasExecution = false) {
+  const messageDiv = document.createElement("div");
+  messageDiv.className = "message message-assistant";
+  
+  const header = document.createElement("div");
+  header.className = "message-header";
+  header.textContent = "🤖 Coding Assistant";
+  
+  const contentDiv = document.createElement("div");
+  contentDiv.className = "message-content";
+  contentDiv.style.padding = "1rem";
+  contentDiv.style.backgroundColor = "#f8f9fa";
+  contentDiv.style.borderRadius = "8px";
+  contentDiv.style.border = "1px solid #e0e0e0";
+  
+  // Task description
+  const taskDiv = document.createElement("div");
+  taskDiv.style.marginBottom = "0.75rem";
+  taskDiv.style.fontWeight = "500";
+  taskDiv.style.color = "#2c3e50";
+  taskDiv.textContent = `Task: ${task}`;
+  contentDiv.appendChild(taskDiv);
+  
+  // Code block
+  const codeDiv = document.createElement("pre");
+  codeDiv.style.backgroundColor = "#1e1e1e";
+  codeDiv.style.color = "#d4d4d4";
+  codeDiv.style.padding = "1rem";
+  codeDiv.style.borderRadius = "6px";
+  codeDiv.style.overflowX = "auto";
+  codeDiv.style.fontFamily = "'Monaco', 'Menlo', 'Courier New', monospace";
+  codeDiv.style.fontSize = "0.9rem";
+  codeDiv.style.lineHeight = "1.5";
+  codeDiv.style.margin = "0";
+  codeDiv.style.whiteSpace = "pre-wrap";
+  codeDiv.style.wordWrap = "break-word";
+  
+  // Apply basic syntax highlighting
+  const highlighted = code
+    .replace(/(\/\/.*$)/gm, '<span style="color: #6a9955;">$1</span>')
+    .replace(/(\/\*[\s\S]*?\*\/)/g, '<span style="color: #6a9955;">$1</span>')
+    .replace(/(["'])(?:(?=(\\?))\2.)*?\1/g, '<span style="color: #ce9178;">$&</span>')
+    .replace(/\b(function|const|let|var|if|else|for|while|return|async|await|import|export|class|extends|def|print|True|False|None)\b/g, '<span style="color: #569cd6;">$&</span>')
+    .replace(/\b(true|false|null|undefined)\b/g, '<span style="color: #569cd6;">$&</span>');
+  
+  codeDiv.innerHTML = highlighted;
+  contentDiv.appendChild(codeDiv);
+  
+  // Execution status
+  if (hasExecution) {
+    const execDiv = document.createElement("div");
+    execDiv.style.marginTop = "0.75rem";
+    execDiv.style.fontSize = "0.85rem";
+    execDiv.style.color = "#666";
+    execDiv.textContent = "✓ Code executed in sandbox";
+    contentDiv.appendChild(execDiv);
+  }
+  
+  messageDiv.appendChild(header);
+  messageDiv.appendChild(contentDiv);
+  
+  return { container: messageDiv, content: contentDiv };
+}
+
+function createMarkdownMessageElement(task, markdown) {
+  const messageDiv = document.createElement("div");
+  messageDiv.className = "message message-assistant";
+  
+  const header = document.createElement("div");
+  header.className = "message-header";
+  header.textContent = "📝 Markdown Assistant";
+  
+  const contentDiv = document.createElement("div");
+  contentDiv.className = "message-content";
+  contentDiv.style.padding = "1rem";
+  contentDiv.style.backgroundColor = "#f8f9fa";
+  contentDiv.style.borderRadius = "8px";
+  contentDiv.style.border = "1px solid #e0e0e0";
+  
+  // Task description
+  const taskDiv = document.createElement("div");
+  taskDiv.style.marginBottom = "0.75rem";
+  taskDiv.style.fontWeight = "500";
+  taskDiv.style.color = "#2c3e50";
+  taskDiv.textContent = `📄 ${task}`;
+  contentDiv.appendChild(taskDiv);
+  
+  // Rendered markdown preview (truncated)
+  const previewDiv = document.createElement("div");
+  const previewId = 'md-preview-' + Math.random().toString(36).substr(2, 9);
+  previewDiv.id = previewId;
+  previewDiv.style.padding = "1rem";
+  previewDiv.style.background = "white";
+  previewDiv.style.borderRadius = "6px";
+  previewDiv.style.border = "1px solid #e9ecef";
+  previewDiv.style.maxHeight = "200px";
+  previewDiv.style.overflowY = "auto";
+  previewDiv.style.lineHeight = "1.5";
+  previewDiv.innerHTML = renderMarkdownPreview(markdown.substring(0, 1000) + (markdown.length > 1000 ? '...' : ''), previewId);
+  contentDiv.appendChild(previewDiv);
+  
+  // Character count
+  const charCount = document.createElement("div");
+  charCount.style.marginTop = "0.5rem";
+  charCount.style.fontSize = "0.85rem";
+  charCount.style.color = "#666";
+  charCount.textContent = `${markdown.length} characters generated`;
+  contentDiv.appendChild(charCount);
+  
+  messageDiv.appendChild(header);
+  messageDiv.appendChild(contentDiv);
+  
+  return { container: messageDiv, content: contentDiv };
+}
+
+function connectVoiceWebSocket() {
+  console.log(`[connectVoiceWebSocket] Function called`);
+  log(`connectVoiceWebSocket called. Current state: voiceWs=${voiceWs ? voiceWs.readyState : 'null'}`);
+  
+  if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+    log("WebSocket already connected");
+    return;
+  }
+  
+  if (voiceWs && (voiceWs.readyState === WebSocket.CONNECTING || voiceWs.readyState === WebSocket.CLOSING)) {
+    log("WebSocket already connecting/closing, waiting...");
+    return;
+  }
+
+  // Close existing connection if any
+  if (voiceWs) {
+    try {
+      voiceWs.close();
+      voiceWs = null;
+    } catch (e) {
+      // Ignore errors closing old connection
+    }
+  }
+
+  log(`Connecting to WebSocket: ${location.protocol === "https:" ? "wss://" : "ws://"}${location.host}/ws/voice`);
+  setConnectionStatus("connecting");
+  const wsProtocol = (location.protocol === "https:") ? "wss://" : "ws://";
+  voiceWs = new WebSocket(wsProtocol + location.host + "/ws/voice");
+  
+  // Add connection timeout
+  const connectionTimeout = setTimeout(() => {
+    if (voiceWs && voiceWs.readyState !== WebSocket.OPEN) {
+      log("Connection timeout - server may not be running");
+      setConnectionStatus("disconnected");
+      try {
+        voiceWs.close();
+      } catch (e) {
+        // Ignore errors
+      }
+    }
+  }, 10000); // 10 second timeout
+
+  voiceWs.onopen = () => {
+    clearTimeout(connectionTimeout);
+    log("Voice WebSocket connected");
+    setConnectionStatus("connected");
+    pushToTalkBtn.disabled = false;
+    // Send pending system prompt if we have one, otherwise get current one
+    setTimeout(() => {
+      if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+        if (pendingSystemPrompt) {
+          // Send the new system prompt
+          voiceWs.send(JSON.stringify({ type: "set_system_prompt", prompt: pendingSystemPrompt }));
+          log(`System prompt set: ${pendingSystemPrompt.substring(0, 50)}...`);
+          pendingSystemPrompt = null;
+        } else {
+          // Request current system prompt
+          voiceWs.send(JSON.stringify({ type: "get_system_prompt" }));
+        }
+        // Set initial voice from dropdown selection
+        const initialVoice = voiceSelect.value;
+        voiceWs.send(JSON.stringify({ type: "set_voice", voice: initialVoice }));
+        
+        // Send initial tool state (capabilities + agents)
+        const capabilityCheckboxes = document.querySelectorAll('input[id^="cap"]');
+        const agentCheckboxes = document.querySelectorAll('input[id^="agent"]');
+        const enabledTools = [];
+        
+        capabilityCheckboxes.forEach(cb => {
+          if (cb.checked) {
+            enabledTools.push(cb.value);
+          }
+        });
+        
+        agentCheckboxes.forEach(cb => {
+          if (cb.checked) {
+            enabledTools.push(cb.value);
+          }
+        });
+        
+        voiceWs.send(JSON.stringify({ type: "set_tools", tools: enabledTools }));
+        
+      }
+    }, 100);
+  };
+
+  voiceWs.onmessage = async (event) => {
+    // Handle binary audio chunks first
+    if (event.data instanceof ArrayBuffer || event.data instanceof Blob) {
+      const size = event.data instanceof Blob ? event.data.size : event.data.byteLength;
+      log(`Received binary audio chunk: ${size} bytes`);
+      await handleAudioChunk(event.data);
+      return;
+    }
+
+    // Handle JSON messages
+    if (typeof event.data === 'string') {
+      try {
+        const data = JSON.parse(event.data);
+        log(`Received JSON message: ${data.type}`);
+        await handleMessage(data);
+      } catch (e) {
+        log("Error parsing message: " + e + " Data: " + event.data.substring(0, 100));
+      }
+    } else {
+      log("Unknown message type: " + typeof event.data + ", constructor: " + event.data.constructor.name);
+    }
+  };
+
+  voiceWs.onerror = (e) => {
+    clearTimeout(connectionTimeout);
+    log("WebSocket error occurred - connection failed");
+    console.error("WebSocket error details:", e);
+    console.error("Error type:", e.type);
+    console.error("Error target:", e.target);
+    // Set status to disconnected on error
+    setConnectionStatus("disconnected");
+    voiceWs = null;
+  };
+
+  voiceWs.onclose = (event) => {
+    clearTimeout(connectionTimeout);
+    log(`Voice WebSocket closed - Code: ${event.code}, Reason: ${event.reason || 'none'}, WasClean: ${event.wasClean}`);
+    console.log("Close event details:", event);
+    setConnectionStatus("disconnected");
+    pushToTalkBtn.disabled = true;
+    voiceWs = null;
+
+    // Only auto-reconnect if it wasn't a clean close (code 1000) or user-initiated disconnect
+    // And only if we're not in the middle of a manual disconnect
+    if (event.code !== 1000 && !isManualDisconnect) {
+      log(`Auto-reconnect scheduled (code: ${event.code}, manual: ${isManualDisconnect})`);
+      // Auto-reconnect after 2 seconds
+      setTimeout(() => {
+        if (!voiceWs || voiceWs.readyState === WebSocket.CLOSED) {
+          log("Attempting to reconnect...");
+          setConnectionStatus("connecting");
+          connectVoiceWebSocket();
+        }
+      }, 2000);
+    } else {
+      log(`Not auto-reconnecting (code: ${event.code}, manual: ${isManualDisconnect})`);
+    }
+    isManualDisconnect = false;
+  };
+}
+
+// Agent code editor state
+let agentCodeEditorContent = "";
+let agentExecutionOutputContent = "";
+let agentModalOpen = false;
+
+function openAgentCodeEditor(agentType, task) {
+  const modal = document.getElementById("agentCodeEditorModal");
+  const taskDesc = document.getElementById("agentTaskDescription");
+  const codeEditor = document.getElementById("agentCodeEditor");
+  const executionOutput = document.getElementById("agentExecutionOutput");
+  
+  agentCodeEditorContent = "";
+  agentExecutionOutputContent = "";
+  codeEditor.innerHTML = '<span style="color: #569cd6;">//</span> <span style="color: #6a9955;">Waiting for agent to start writing code...</span>';
+  if (executionOutput) {
+    executionOutput.innerHTML = '<span style="color: #7dd3fc; opacity: 0.7;">Waiting for execution...</span>';
+  }
+  taskDesc.textContent = task || "Working on your request...";
+  
+  modal.style.display = "block";
+  agentModalOpen = true;
+  log(`Agent code editor opened: ${agentType}`);
+}
+
+function closeAgentCodeEditor() {
+  const modal = document.getElementById("agentCodeEditorModal");
+  modal.style.display = "none";
+  agentModalOpen = false;
+  agentCodeEditorContent = "";
+  agentExecutionOutputContent = "";
+  log("Agent code editor closed");
+}
+
+// Markdown Assistant state and functions
+let markdownModalOpen = false;
+let markdownContent = "";
+
+function openMarkdownEditor(task) {
+  const modal = document.getElementById("agentMarkdownEditorModal");
+  const taskDesc = document.getElementById("markdownTaskDescription");
+  const editor = document.getElementById("agentMarkdownEditor");
+  const preview = document.getElementById("agentMarkdownPreview");
+  
+  markdownContent = "";
+  editor.innerHTML = '<span style="color: #6a9955;">// Waiting for agent to start writing...</span>';
+  preview.innerHTML = '<span style="color: #adb5bd; font-style: italic;">Preview will appear here...</span>';
+  if (taskDesc) taskDesc.textContent = task || "Working on your document...";
+  
+  // Reset status
+  const statusEl = document.getElementById("markdownStatus");
+  if (statusEl) {
+    statusEl.innerHTML = `<span style="width: 8px; height: 8px; background: #3498db; border-radius: 50%; animation: pulse 2s infinite;"></span><span style="color: #666;">Agent is working...</span>`;
+  }
+  
+  modal.style.display = "block";
+  markdownModalOpen = true;
+  log(`Markdown editor opened: ${task}`);
+}
+
+function closeMarkdownEditor() {
+  const modal = document.getElementById("agentMarkdownEditorModal");
+  modal.style.display = "none";
+  markdownModalOpen = false;
+  markdownContent = "";
+  log("Markdown editor closed");
+}
+
+// ========================================
+// HTML Editor Functions
+// ========================================
+
+let htmlModalOpen = false;
+let htmlContent = "";
+
+function openHtmlEditor(task) {
+  const modal = document.getElementById("agentHtmlEditorModal");
+  const taskDesc = document.getElementById("htmlTaskDescription");
+  const editor = document.getElementById("agentHtmlEditor");
+  const preview = document.getElementById("agentHtmlPreview");
+  const charCount = document.getElementById("htmlCharCount");
+  
+  htmlContent = "";
+  editor.innerHTML = '<span style="color: #6a9955;">// Waiting for agent to start writing...</span>';
+  preview.srcdoc = '<html><body style="font-family: sans-serif; color: #adb5bd; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;"><p>Preview will appear here...</p></body></html>';
+  if (taskDesc) taskDesc.textContent = task || "Building your webpage...";
+  if (charCount) charCount.textContent = "0 chars";
+  
+  // Reset status
+  const statusEl = document.getElementById("htmlStatus");
+  if (statusEl) {
+    statusEl.innerHTML = `<span style="width: 8px; height: 8px; background: #3498db; border-radius: 50%; animation: pulse 2s infinite;"></span><span style="color: #666;">Agent is building...</span>`;
+  }
+  
+  modal.style.display = "block";
+  htmlModalOpen = true;
+  log(`HTML editor opened: ${task}`);
+}
+
+function closeHtmlEditor() {
+  const modal = document.getElementById("agentHtmlEditorModal");
+  modal.style.display = "none";
+  htmlModalOpen = false;
+  htmlContent = "";
+  log("HTML editor closed");
+}
+
+function refreshHtmlPreview() {
+  const preview = document.getElementById("agentHtmlPreview");
+  if (preview && htmlContent) {
+    preview.srcdoc = htmlContent;
+    log("HTML preview refreshed");
+  }
+}
+
+function copyHtmlCode() {
+  if (htmlContent) {
+    navigator.clipboard.writeText(htmlContent).then(() => {
+      const btn = document.getElementById("copyHtmlBtn");
+      const original = btn.textContent;
+      btn.textContent = "✓ Copied!";
+      setTimeout(() => btn.textContent = original, 2000);
+    });
+  }
+}
+
+function downloadHtml() {
+  if (htmlContent) {
+    const blob = new Blob([htmlContent], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'generated-page.html';
+    a.click();
+    URL.revokeObjectURL(url);
+    log("HTML downloaded");
+  }
+}
+
+function renderMarkdownPreview(markdown, containerId) {
+  // Use marked.js for proper markdown rendering
+  if (typeof marked !== 'undefined') {
+    // Configure marked for GFM (GitHub Flavored Markdown) with tables
+    marked.setOptions({
+      gfm: true,
+      breaks: true,
+      tables: true,
+      sanitize: false
+    });
+    
+    // Custom renderer for mermaid code blocks
+    const renderer = new marked.Renderer();
+    const originalCodeRenderer = renderer.code;
+    
+    renderer.code = function(code, language) {
+      // Handle both old and new marked.js API
+      const codeText = typeof code === 'object' ? code.text : code;
+      const codeLang = typeof code === 'object' ? code.lang : language;
+      
+      if (codeLang === 'mermaid') {
+        // Return a placeholder div for mermaid to process
+        const mermaidId = 'mermaid-' + Math.random().toString(36).substr(2, 9);
+        return `<div class="mermaid" id="${mermaidId}">${codeText}</div>`;
+      }
+      // For other code blocks, use default rendering
+      return `<pre><code class="language-${codeLang || ''}">${escapeHtml(codeText)}</code></pre>`;
+    };
+    
+    marked.setOptions({ renderer: renderer });
+    
+    let html = marked.parse(markdown);
+    
+    // Schedule mermaid rendering after DOM update
+    if (containerId && markdown.includes('```mermaid')) {
+      setTimeout(() => {
+        try {
+          if (typeof mermaid !== 'undefined') {
+            mermaid.init(undefined, document.querySelectorAll(`#${containerId} .mermaid`));
+          }
+        } catch (e) {
+          console.log('Mermaid rendering error:', e);
+        }
+      }, 100);
+    }
+    
+    return html;
+  }
+  
+  // Fallback: Simple markdown to HTML converter if marked.js not loaded
+  let html = markdown
+    // Code blocks first (before other formatting)
+    .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
+    // Inline code
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    // Tables (basic GFM table support)
+    .replace(/^\|(.+)\|$/gm, function(match, content) {
+      const cells = content.split('|').map(c => c.trim());
+      return '<tr>' + cells.map(c => {
+        if (c.match(/^[-:]+$/)) return ''; // Skip separator row
+        return '<td>' + c + '</td>';
+      }).join('') + '</tr>';
+    })
+    // Headers
+    .replace(/^### (.*)$/gm, '<h3>$1</h3>')
+    .replace(/^## (.*)$/gm, '<h2>$1</h2>')
+    .replace(/^# (.*)$/gm, '<h1>$1</h1>')
+    // Bold and italic
+    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    // Links
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank">$1</a>')
+    // Blockquotes
+    .replace(/^> (.*)$/gm, '<blockquote>$1</blockquote>')
+    // Horizontal rule
+    .replace(/^---$/gm, '<hr>')
+    // Unordered lists
+    .replace(/^- (.*)$/gm, '<li>$1</li>')
+    .replace(/(<li>.*<\/li>)\n(?=<li>)/g, '$1')
+    // Line breaks to paragraphs (simple approach)
+    .replace(/\n\n/g, '</p><p>')
+    .replace(/\n/g, '<br>');
+  
+  // Wrap in paragraph if not starting with block element
+  if (!html.startsWith('<h') && !html.startsWith('<pre') && !html.startsWith('<ul') && !html.startsWith('<ol') && !html.startsWith('<blockquote') && !html.startsWith('<table')) {
+    html = '<p>' + html + '</p>';
+  }
+  
+  return html;
+}
+
+function copyMarkdownToClipboard() {
+  navigator.clipboard.writeText(markdownContent).then(() => {
+    const btn = document.getElementById("copyMarkdownBtn");
+    const originalText = btn.textContent;
+    btn.textContent = "✓ Copied!";
+    setTimeout(() => { btn.textContent = originalText; }, 2000);
+  });
+}
+
+// Close button handler
+document.addEventListener("DOMContentLoaded", () => {
+  const closeBtn = document.getElementById("closeAgentModal");
+  if (closeBtn) {
+    closeBtn.onclick = closeAgentCodeEditor;
+  }
+  
+  // Markdown modal handlers
+  const closeMarkdownBtn = document.getElementById("closeMarkdownModal");
+  if (closeMarkdownBtn) {
+    closeMarkdownBtn.onclick = closeMarkdownEditor;
+  }
+  
+  const copyMarkdownBtn = document.getElementById("copyMarkdownBtn");
+  if (copyMarkdownBtn) {
+    copyMarkdownBtn.onclick = copyMarkdownToClipboard;
+  }
+  
+  // Close on escape key
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      if (agentModalOpen) closeAgentCodeEditor();
+      if (markdownModalOpen) closeMarkdownEditor();
+    }
+  });
+});
+
+async function handleMessage(data) {
+  log(`Received message: ${data.type}`);
+
+  switch (data.type) {
+    case "connected":
+      log("Server ready - connection established");
+      // Initialize audio context when connected (needed for greeting playback)
+      initializeAudioOnConnection();
+      // Greeting will be sent by server automatically
+      break;
+
+    case "asr_partial":
+      // Update current user message with partial transcription
+      removeEmptyState();
+      if (!currentUserMsg) {
+        // Create new user message for this recording session
+        const msg = createMessageElement("user", "");
+        getActiveConversationEl().appendChild(msg.container);
+        currentUserMsg = msg;
+      }
+      currentUserMsg.content.textContent = data.text;
+      scrollToBottom();
+      break;
+
+    case "asr_final":
+      // Final transcription received
+      removeEmptyState();
+      if (!currentUserMsg) {
+        // Create user message if it doesn't exist
+        const msg = createMessageElement("user", data.text);
+        getActiveConversationEl().appendChild(msg.container);
+        currentUserMsg = msg;
+      } else {
+        currentUserMsg.content.textContent = data.text;
+      }
+      // Clear current user message reference so next recording creates a new one
+      currentUserMsg = null;
+      log(`Final transcription: "${data.text}"`);
+      
+      // Update voice/video call status
+      if (voiceCallActive) {
+        updateVoiceCallStatus('processing', 'Thinking...');
+      }
+      if (videoCallActive) {
+        updateVideoCallStatus('processing', 'Looking & thinking...');
+      }
+      break;
+
+    case "transient_response":
+      // Transient response (e.g., "on it", "thinking...")
+      removeEmptyState();
+      if (currentTransientMsg) {
+        currentTransientMsg.container.remove();
+      }
+      const transientMsg = createMessageElement("assistant", data.text, true);
+      getActiveConversationEl().appendChild(transientMsg.container);
+      currentTransientMsg = transientMsg;
+      scrollToBottom();
+      log(`Transient response: "${data.text}"`);
+      break;
+
+    case "agent_started":
+      // Agent tool was called - open appropriate UI
+      if (data.agent_type === "markdown_assistant") {
+        openMarkdownEditor(data.task);
+      } else if (data.agent_type === "html_assistant") {
+        openHtmlEditor(data.task);
+      } else {
+        openAgentCodeEditor(data.agent_type, data.task);
+      }
+      break;
+
+    case "agent_code_complete":
+      // Coding assistant finished generating code - add to conversation
+      removeEmptyState();
+      const codeMsg = createCodeMessageElement(data.task, data.code, data.has_execution);
+      getActiveConversationEl().appendChild(codeMsg.container);
+      scrollToBottom();
+      // Save chat after code generation
+      saveCurrentChat();
+      log(`Coding assistant completed: ${data.task.substring(0, 50)}...`);
+      break;
+
+    case "agent_code_chunk":
+      // Stream code to editor or execution output
+      const codeEditor = document.getElementById("agentCodeEditor");
+      const executionOutput = document.getElementById("agentExecutionOutput");
+      if (agentModalOpen) {
+        if (data.done) {
+          // Agent finished
+          const statusEl = document.getElementById("agentStatus");
+          if (statusEl) {
+            statusEl.innerHTML = '<span style="width: 8px; height: 8px; background: #2ecc71; border-radius: 50%;"></span><span style="color: #666;">Agent completed</span>';
+          }
+        } else {
+          const content = data.content || "";
+          
+          // Check if this is an execution message (starts with // Executing or // Execution or // Error)
+          if (content.includes("// Executing") || content.includes("// Execution") || content.includes("// Error") || content.includes("// Attempting") || content.includes("// Fixed code") || content.includes("// Could not fix")) {
+            // This is execution output - append to execution output section
+            agentExecutionOutputContent += content;
+            if (executionOutput) {
+              // Style execution messages with distinct colors
+              let styled = agentExecutionOutputContent
+                .replace(/(\/\/ Executing code.*?)/g, '<span style="color: #fbbf24; font-weight: 600;">$1</span>')
+                .replace(/(\/\/ Execution successful:.*?)/g, '<span style="color: #34d399; font-weight: 600;">$1</span>')
+                .replace(/(\/\/ Error occurred:.*?)/g, '<span style="color: #f87171; font-weight: 600;">$1</span>')
+                .replace(/(\/\/ Attempting to fix code.*?)/g, '<span style="color: #60a5fa; font-weight: 600;">$1</span>')
+                .replace(/(\/\/ Fixed code.*?)/g, '<span style="color: #a78bfa; font-weight: 600;">$1</span>')
+                .replace(/(\/\/ Could not fix.*?)/g, '<span style="color: #f87171; font-weight: 600;">$1</span>');
+              executionOutput.innerHTML = styled;
+              executionOutput.scrollTop = executionOutput.scrollHeight;
+            }
+          } else {
+            // This is code - append to code editor
+            agentCodeEditorContent += content;
+            if (codeEditor) {
+              // Simple syntax highlighting (basic)
+              const highlighted = agentCodeEditorContent
+                .replace(/(\/\/.*$)/gm, '<span style="color: #6a9955;">$1</span>')
+                .replace(/(\/\*[\s\S]*?\*\/)/g, '<span style="color: #6a9955;">$1</span>')
+                .replace(/(["'])(?:(?=(\\?))\2.)*?\1/g, '<span style="color: #ce9178;">$&</span>')
+                .replace(/\b(function|const|let|var|if|else|for|while|return|async|await|import|export|class|extends)\b/g, '<span style="color: #569cd6;">$&</span>')
+                .replace(/\b(true|false|null|undefined)\b/g, '<span style="color: #569cd6;">$&</span>');
+              codeEditor.innerHTML = highlighted;
+              codeEditor.scrollTop = codeEditor.scrollHeight;
+            }
+          }
+        }
+      }
+      break;
+
+    case "agent_code_update":
+      // Replace entire code editor content (for fixed code)
+      const codeEditorUpdate = document.getElementById("agentCodeEditor");
+      if (codeEditorUpdate && agentModalOpen) {
+        const newCode = data.content || "";
+        agentCodeEditorContent = newCode;
+        // Apply syntax highlighting
+        const highlighted = agentCodeEditorContent
+          .replace(/(\/\/.*$)/gm, '<span style="color: #6a9955;">$1</span>')
+          .replace(/(\/\*[\s\S]*?\*\/)/g, '<span style="color: #6a9955;">$1</span>')
+          .replace(/(["'])(?:(?=(\\?))\2.)*?\1/g, '<span style="color: #ce9178;">$&</span>')
+          .replace(/\b(function|const|let|var|if|else|for|while|return|async|await|import|export|class|extends)\b/g, '<span style="color: #569cd6;">$&</span>')
+          .replace(/\b(true|false|null|undefined)\b/g, '<span style="color: #569cd6;">$&</span>');
+        codeEditorUpdate.innerHTML = highlighted;
+        codeEditorUpdate.scrollTop = codeEditorUpdate.scrollHeight;
+      }
+      break;
+
+    case "agent_markdown_chunk":
+      // Stream markdown to editor
+      if (markdownModalOpen) {
+        const mdEditor = document.getElementById("agentMarkdownEditor");
+        const mdPreview = document.getElementById("agentMarkdownPreview");
+        
+        if (data.done) {
+          // Agent finished
+          const statusEl = document.getElementById("markdownStatus");
+          if (statusEl) {
+            statusEl.innerHTML = '<span style="width: 8px; height: 8px; background: #2ecc71; border-radius: 50%;"></span><span style="color: #666;">Document complete</span>';
+          }
+        } else {
+          const content = data.content || "";
+          markdownContent += content;
+          
+          // Update raw markdown view
+          if (mdEditor) {
+            mdEditor.textContent = markdownContent;
+            mdEditor.scrollTop = mdEditor.scrollHeight;
+          }
+          
+          // Update preview
+          if (mdPreview) {
+            mdPreview.innerHTML = renderMarkdownPreview(markdownContent, 'agentMarkdownPreview');
+            mdPreview.scrollTop = mdPreview.scrollHeight;
+          }
+        }
+      }
+      break;
+
+    case "agent_html_chunk":
+      // Stream HTML to editor with live preview
+      if (htmlModalOpen) {
+        const htmlEditor = document.getElementById("agentHtmlEditor");
+        const htmlPreview = document.getElementById("agentHtmlPreview");
+        const htmlCharCount = document.getElementById("htmlCharCount");
+        
+        if (data.done) {
+          // Agent finished - final preview update
+          const statusEl = document.getElementById("htmlStatus");
+          if (statusEl) {
+            statusEl.innerHTML = '<span style="width: 8px; height: 8px; background: #2ecc71; border-radius: 50%;"></span><span style="color: #666;">Page complete!</span>';
+          }
+          // Final preview refresh
+          if (htmlPreview && htmlContent) {
+            htmlPreview.srcdoc = htmlContent;
+          }
+        } else {
+          const content = data.content || "";
+          htmlContent += content;
+          
+          // Update code view
+          if (htmlEditor) {
+            htmlEditor.textContent = htmlContent;
+            htmlEditor.scrollTop = htmlEditor.scrollHeight;
+          }
+          
+          // Update char count
+          if (htmlCharCount) {
+            htmlCharCount.textContent = `${htmlContent.length} chars`;
+          }
+          
+          // Update live preview periodically (every 500 chars or when we have complete HTML structure)
+          if (htmlPreview && htmlContent.length > 0) {
+            // Only update preview if we have a reasonable amount of content
+            if (htmlContent.includes('</body>') || htmlContent.includes('</html>') || htmlContent.length % 500 < content.length) {
+              htmlPreview.srcdoc = htmlContent;
+            }
+          }
+        }
+      }
+      break;
+
+    case "agent_html_complete":
+      // HTML generation complete
+      log(`HTML assistant completed: ${data.task}`);
+      if (htmlModalOpen) {
+        const htmlPreview = document.getElementById("agentHtmlPreview");
+        if (htmlPreview && data.html) {
+          htmlContent = data.html;
+          htmlPreview.srcdoc = data.html;
+        }
+      }
+      break;
+    
+    case "agent_markdown_complete":
+      // Markdown assistant finished - add to conversation
+      removeEmptyState();
+      const mdMsg = createMarkdownMessageElement(data.task, data.markdown);
+      getActiveConversationEl().appendChild(mdMsg.container);
+      scrollToBottom();
+      saveCurrentChat();
+      log(`Markdown assistant completed: ${data.task.substring(0, 50)}...`);
+      break;
+
+    case "final_response":
+      // Final response received
+      removeEmptyState();
+      if (currentTransientMsg) {
+        currentTransientMsg.container.remove();
+        currentTransientMsg = null;
+      }
+      const finalMsg = createMessageElement("assistant", data.text);
+      getActiveConversationEl().appendChild(finalMsg.container);
+      scrollToBottom();
+      // Save chat after assistant response
+      saveCurrentChat();
+      log(`Final response: "${data.text}"`);
+      break;
+
+    case "asr_result":
+      // ASR transcription result (used by video/voice call mode)
+      removeEmptyState();
+      const asrText = data.text || data.content || "";
+      if (asrText.trim()) {
+        const userMsg = createMessageElement("user", asrText);
+        getActiveConversationEl().appendChild(userMsg.container);
+        scrollToBottom();
+        saveCurrentChat();
+        log(`ASR result displayed: ${asrText}`);
+      }
+      break;
+
+    case "llm_final":
+      // VLM/LLM final response (used by video call mode)
+      removeEmptyState();
+      if (currentTransientMsg) {
+        currentTransientMsg.container.remove();
+        currentTransientMsg = null;
+      }
+      const llmText = data.text || data.content || "";
+      if (llmText.trim()) {
+        const vlmMsg = createMessageElement("assistant", llmText);
+        getActiveConversationEl().appendChild(vlmMsg.container);
+        scrollToBottom();
+        saveCurrentChat();
+        log(`VLM response: "${llmText.substring(0, 50)}..."`);
+      }
+      break;
+
+    case "tts_start":
+      // TTS streaming started
+      log(`TTS started (transient: ${data.is_transient})`);
+      isTtsPlaying = true;
+      ttsAborted = false; // Reset abort flag for new TTS
+      
+      // Ensure gain is restored
+      if (masterGainNode && audioContext) {
+        masterGainNode.gain.setValueAtTime(1, audioContext.currentTime);
+      }
+      
+      // Update voice/video call status
+      if (voiceCallActive) {
+        updateVoiceCallStatus('speaking', 'Speaking...');
+      }
+      if (videoCallActive) {
+        updateVideoCallStatus('speaking', 'Speaking...');
+      }
+      
+      if (!audioContext) {
+        try {
+          audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: data.sample_rate || 24000 });
+          log(`Audio context created with sample rate: ${data.sample_rate || 24000}, state: ${audioContext.state}`);
+        } catch (e) {
+          log("Error creating audio context: " + e);
+          break;
+        }
+      }
+      
+      // Resume audio context if suspended (browser autoplay policy)
+      if (audioContext.state === 'suspended') {
+        audioContext.resume().then(() => {
+          log(`Audio context resumed from suspended state, new state: ${audioContext.state}`);
+        }).catch(e => {
+          log("Error resuming audio context: " + e);
+        });
+      }
+      
+      // Reset nextPlayTime for new TTS stream - start immediately
+      nextPlayTime = audioContext.currentTime;
+      log(`TTS playback scheduled to start at: ${nextPlayTime.toFixed(3)}s, context state: ${audioContext.state}`);
+      break;
+
+    case "tts_done":
+      // TTS streaming complete (server done sending chunks)
+      // But audio may still be playing in the browser!
+      log(`TTS done from server (transient: ${data.is_transient}), active sources: ${activeAudioSources.length}`);
+      
+      // Only set isTtsPlaying=false if no audio sources are still playing
+      // Otherwise, the source.onended handler will set it to false
+      if (activeAudioSources.length === 0) {
+        isTtsPlaying = false;
+        // Update voice/video call status - back to listening
+        if (voiceCallActive && !voiceCallMuted) {
+          updateVoiceCallStatus('listening', 'Listening...');
+        }
+        if (videoCallActive && !videoCallMuted) {
+          // Show appropriate status based on input mode
+          if (pttMode) {
+            updateVideoCallStatus('listening', 'Press SPACE or hold button to talk');
+          } else {
+            updateVideoCallStatus('listening', 'Listening...');
+          }
+        }
+      } else {
+        log(`Audio still playing (${activeAudioSources.length} sources), keeping isTtsPlaying=true`);
+      }
+      break;
+
+    case "error":
+      log("Error: " + data.error);
+      alert("Error: " + data.error);
+      break;
+
+    case "pong":
+      // Keep-alive response
+      break;
+
+    case "reset_ack":
+      log("Conversation reset");
+      break;
+
+    case "voice_changed":
+      log(`Voice changed to: ${data.voice}`);
+      break;
+
+
+    case "system_prompt":
+      // Received current system prompt
+      systemPromptInput.value = data.prompt || "";
+      break;
+
+    case "system_prompt_changed":
+      log(`System prompt changed`);
+      break;
+
+    case "disconnect_ack":
+      log("Disconnect acknowledged by server");
+      break;
+  }
+}
+
+async function handleAudioChunk(data) {
+  // Check if TTS was aborted (barge-in) - discard incoming audio
+  if (ttsAborted) {
+    log('Audio chunk discarded (TTS aborted)');
+    return;
+  }
+  
+  // Initialize audio context if not already done
+  if (!audioContext) {
+    log("Initializing audio context for first chunk");
+    try {
+      audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+      nextPlayTime = audioContext.currentTime;
+      log(`Audio context created, state: ${audioContext.state}`);
+      
+      // Resume audio context if suspended (browser autoplay policy)
+      if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+        log(`Audio context resumed, new state: ${audioContext.state}`);
+      }
+    } catch (e) {
+      log("Error initializing audio context: " + e);
+      return;
+    }
+  }
+
+  // Ensure audio context exists and is running
+  if (!audioContext) {
+    initializeAudioContext();
+  }
+  
+  if (audioContext && audioContext.state === 'suspended') {
+    try {
+      await audioContext.resume();
+      log(`Audio context resumed from suspended state`);
+    } catch (e) {
+      // Browser autoplay policy may prevent this - user needs to interact first
+      log("Audio context resume blocked (user interaction required)");
+      // Don't throw - we'll try again on next chunk after user interaction
+      return;
+    }
+  }
+
+  const arrayBuffer = data instanceof Blob ? await data.arrayBuffer() : data;
+  
+  if (arrayBuffer.byteLength === 0) {
+    log("Empty audio chunk received, skipping");
+    return;
+  }
+  
+  const int16Data = new Int16Array(arrayBuffer);
+  
+  if (int16Data.length === 0) {
+    log("Empty int16 array, skipping");
+    return;
+  }
+  
+  // Convert Int16 to Float32
+  const float32Data = new Float32Array(int16Data.length);
+  for (let i = 0; i < float32Data.length; i++) {
+    float32Data[i] = int16Data[i] / 32768.0;
+  }
+  
+  // Create buffer and play
+  try {
+    const buffer = audioContext.createBuffer(1, float32Data.length, 24000);
+    buffer.copyToChannel(float32Data, 0);
+    
+    const source = audioContext.createBufferSource();
+    source.buffer = buffer;
+    
+    // Use master gain node for instant muting (barge-in)
+    if (!masterGainNode) {
+      masterGainNode = audioContext.createGain();
+      masterGainNode.connect(audioContext.destination);
+    }
+    source.connect(masterGainNode);
+    
+    // Track this source for potential barge-in stop
+    activeAudioSources.push(source);
+    source.onended = () => {
+      const idx = activeAudioSources.indexOf(source);
+      if (idx > -1) activeAudioSources.splice(idx, 1);
+      
+      // When last audio source ends, TTS is truly done playing
+      if (activeAudioSources.length === 0) {
+        isTtsPlaying = false;
+        log('All audio sources finished playing');
+      }
+    };
+    
+    // Schedule playback
+    if (nextPlayTime === null || nextPlayTime < audioContext.currentTime) {
+      nextPlayTime = audioContext.currentTime;
+    }
+    
+    const playTime = nextPlayTime;
+    source.start(playTime);
+    nextPlayTime = playTime + buffer.duration;
+    
+    log(`Playing audio chunk: ${buffer.duration.toFixed(3)}s at ${playTime.toFixed(3)}s (${int16Data.length} samples), context state: ${audioContext.state}`);
+  } catch (e) {
+    log("Error playing audio chunk: " + e + ", audio context state: " + (audioContext ? audioContext.state : 'null'));
+    console.error("Audio playback error:", e);
+  }
+}
+
+async function startRecording() {
+  if (isRecording) {
+    log("Already recording, ignoring start request");
+    return;
+  }
+  
+  if (!voiceWs || voiceWs.readyState !== WebSocket.OPEN) {
+    log(`Cannot start recording: WebSocket not ready (state: ${voiceWs ? voiceWs.readyState : 'null'})`);
+    alert("Not connected. Please wait for connection.");
+    return;
+  }
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    alert("Microphone access not available. Use https or localhost.");
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ 
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        sampleRate: 16000
+      } 
+    });
+
+    // Try to find a supported codec
+    const codecs = [
+      'audio/webm;codecs=opus',
+      'audio/webm;codecs=vorbis',
+      'audio/webm',
+    ];
+    
+    let selectedMimeType = null;
+    for (const codec of codecs) {
+      if (MediaRecorder.isTypeSupported(codec)) {
+        selectedMimeType = codec;
+        break;
+      }
+    }
+
+    const options = selectedMimeType ? { mimeType: selectedMimeType } : {};
+    mediaRecorder = new MediaRecorder(stream, options);
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0 && voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+        voiceWs.send(e.data);
+      }
+    };
+
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(track => track.stop());
+      // Send ASR end signal
+      if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+        voiceWs.send(JSON.stringify({ type: "asr_end" }));
+      }
+    };
+
+    mediaRecorder.start(250); // 250ms chunks
+    isRecording = true;
+    currentUserMsg = null; // Reset for new recording session
+    pushToTalkBtn.classList.add("recording");
+    pushToTalkBtn.disabled = false;
+    log("Recording started");
+  } catch (err) {
+    log("Could not start recording: " + err);
+    alert("Recording failed: " + err.message);
+  }
+}
+
+function stopRecording() {
+  if (!isRecording) {
+    log("Not recording, ignoring stop request");
+    return;
+  }
+
+  log("Stopping recording...");
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    mediaRecorder.stop();
+  }
+
+  isRecording = false;
+  pushToTalkBtn.classList.remove("recording");
+  pushToTalkBtn.disabled = false;
+  log("Recording stopped");
+}
+
+function clearChat() {
+  conversationEl.innerHTML = '<div class="empty-state">Connect and start a conversation</div>';
+  currentTransientMsg = null;
+  
+  // Clear current chat messages
+  if (currentChatId && chats[currentChatId]) {
+    chats[currentChatId].messages = [];
+    chats[currentChatId].preview = '';
+    saveChatsToStorage();
+    renderChatList();
+  }
+  
+  log("Chat cleared");
+}
+
+// Initialize
+clearBtn.onclick = clearChat;
+
+// Initialize chat system
+loadChatsFromStorage();
+if (!currentChatId || !chats[currentChatId]) {
+  createNewChat();
+} else {
+  loadChat(currentChatId);
+}
+
+// Initialize text input handlers
+if (textInput) {
+  textInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendTextMessage();
+    }
+  });
+  
+  // Auto-resize textarea
+  textInput.addEventListener('input', () => {
+    textInput.style.height = 'auto';
+    textInput.style.height = Math.min(textInput.scrollHeight, 120) + 'px';
+  });
+}
+
+// Initialize text input state
+updateTextInputState();
+
+// Track manual disconnect to prevent auto-reconnect
+let isManualDisconnect = false;
+
+// Disconnect/Connect toggle handler
+disconnectBtn.onclick = () => {
+  log(`Disconnect/Connect button clicked. WebSocket state: ${voiceWs ? voiceWs.readyState : 'null'}`);
+  
+  if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+    // Disconnect
+    log("Manual disconnect initiated");
+    isManualDisconnect = true;
+    voiceWs.send(JSON.stringify({ type: "disconnect" }));
+    log("Disconnecting...");
+  } else {
+    // Connect
+    log("Connect button clicked - initiating connection");
+    const prompt = systemPromptInput.value.trim();
+    if (!prompt) {
+      alert("Please enter a system prompt before connecting");
+      log("No system prompt - connection cancelled");
+      return;
+    }
+    
+    // Store prompt to send after connection
+    pendingSystemPrompt = prompt;
+    log(`System prompt stored: ${prompt.substring(0, 50)}...`);
+    
+    // Connect WebSocket
+    connectVoiceWebSocket();
+  }
+};
+
+// Voice selection handler
+voiceSelect.onchange = (e) => {
+  const selectedVoice = e.target.value;
+  if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+    voiceWs.send(JSON.stringify({ type: "set_voice", voice: selectedVoice }));
+    log(`Voice selection changed to: ${selectedVoice}`);
+  } else {
+    log("Cannot change voice: WebSocket not connected");
+  }
+};
+
+// Tool capability checkboxes handler
+function updateEnabledTools() {
+  const capabilityCheckboxes = document.querySelectorAll('input[id^="cap"]');
+  const agentCheckboxes = document.querySelectorAll('input[id^="agent"]');
+  const enabledTools = [];
+  
+  capabilityCheckboxes.forEach(cb => {
+    if (cb.checked) {
+      enabledTools.push(cb.value);
+    }
+  });
+  
+  agentCheckboxes.forEach(cb => {
+    if (cb.checked) {
+      enabledTools.push(cb.value);
+    }
+  });
+  
+  if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+    voiceWs.send(JSON.stringify({ type: "set_tools", tools: enabledTools }));
+    log(`Tools updated: ${enabledTools.join(", ")}`);
+  } else {
+    log("Cannot update tools: WebSocket not connected");
+  }
+}
+
+// Attach change handlers to all capability and agent checkboxes
+document.addEventListener("DOMContentLoaded", () => {
+  const capabilityCheckboxes = document.querySelectorAll('input[id^="cap"]');
+  const agentCheckboxes = document.querySelectorAll('input[id^="agent"]');
+  
+  capabilityCheckboxes.forEach(cb => {
+    cb.addEventListener("change", updateEnabledTools);
+  });
+  
+  agentCheckboxes.forEach(cb => {
+    cb.addEventListener("change", updateEnabledTools);
+  });
+});
+
+
+// Store pending system prompt
+let pendingSystemPrompt = null;
+
+// Save prompt button (if it exists - kept for compatibility)
+if (savePromptBtn) {
+  savePromptBtn.onclick = () => {
+    const prompt = systemPromptInput.value.trim();
+    if (prompt && voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+      voiceWs.send(JSON.stringify({ type: "set_system_prompt", prompt: prompt }));
+      log(`System prompt updated`);
+    } else if (!prompt) {
+      alert("Please enter a system prompt");
+    } else {
+      log("Cannot update prompt: WebSocket not connected");
+    }
+  };
+}
+
+// Push-to-talk button functionality (works for both touch and mouse)
+let isPressingButton = false;
+
+function handlePushStart(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  
+  if (isRecording || !voiceWs || voiceWs.readyState !== WebSocket.OPEN) {
+    log("Cannot start recording: " + (isRecording ? "already recording" : "not connected"));
+    return;
+  }
+  
+  isPressingButton = true;
+  pushToTalkBtn.classList.add("recording");
+  startRecording();
+}
+
+function handlePushEnd(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  
+  if (isPressingButton && isRecording) {
+    isPressingButton = false;
+    pushToTalkBtn.classList.remove("recording");
+    stopRecording();
+  }
+}
+
+// Add event listeners to push-to-talk button
+if (pushToTalkBtn) {
+  // Mouse events
+  pushToTalkBtn.addEventListener("mousedown", handlePushStart);
+  pushToTalkBtn.addEventListener("mouseup", handlePushEnd);
+  pushToTalkBtn.addEventListener("mouseleave", handlePushEnd); // Stop if mouse leaves button
+  
+  // Touch events (for mobile)
+  pushToTalkBtn.addEventListener("touchstart", handlePushStart, { passive: false });
+  pushToTalkBtn.addEventListener("touchend", handlePushEnd, { passive: false });
+  pushToTalkBtn.addEventListener("touchcancel", handlePushEnd, { passive: false });
+  
+  log("Push-to-talk button event listeners attached");
+} else {
+  log("ERROR: pushToTalkBtn not found!");
+}
+
+// Hold-to-talk functionality - using 0 (zero) key (still works for keyboard users)
+// Setup key listeners after page is fully loaded
+function setupKeyListeners() {
+  // Main recording handler
+  window.addEventListener("keydown", function(e) {
+    // Don't trigger recording if user is typing in an input/textarea
+    const activeElement = document.activeElement;
+    const isTyping = activeElement && (
+      activeElement.tagName === "INPUT" || 
+      activeElement.tagName === "TEXTAREA" ||
+      (activeElement.isContentEditable && activeElement !== document.body)
+    );
+    
+    // Check if the 0 (zero) key is pressed
+    const isRecordKey = e.code === "Digit0" || 
+                       e.key === "0" || 
+                       e.keyCode === 48;
+    
+    if (isRecordKey && !isRecording && !e.repeat && !isTyping) {
+      e.preventDefault();
+      e.stopPropagation();
+      pushToTalkBtn.classList.add("recording");
+      startRecording();
+    }
+  }, { capture: true, passive: false });
+
+  window.addEventListener("keyup", function(e) {
+    // Check if the 0 (zero) key is released
+    const isRecordKey = e.code === "Digit0" || 
+                       e.key === "0" || 
+                       e.keyCode === 48;
+    
+    if (isRecordKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (isRecording) {
+        pushToTalkBtn.classList.remove("recording");
+        stopRecording();
+      }
+    }
+  }, { capture: true, passive: false });
+}
+
+// Setup key listeners when DOM is ready
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', setupKeyListeners);
+} else {
+  // DOM is already ready
+  setupKeyListeners();
+}
+
+// Initialize audio context on first user interaction (required by browsers)
+let audioInitialized = false;
+
+function initializeAudioContext() {
+  if (!audioContext) {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+    nextPlayTime = audioContext.currentTime;
+    audioInitialized = true;
+    log("Audio context initialized");
+  }
+  
+  // Resume if suspended
+  if (audioContext.state === 'suspended') {
+    return audioContext.resume().then(() => {
+      log("Audio context resumed");
+    }).catch((e) => {
+      log("Error resuming audio context: " + e);
+    });
+  }
+  
+  return Promise.resolve();
+}
+
+function initializeAudioOnInteraction() {
+  initializeAudioContext();
+}
+
+function initializeAudioOnConnection() {
+  // Try to initialize audio context on connection
+  // This may fail due to browser autoplay policy, but we try anyway
+  initializeAudioContext().catch(() => {
+    // If it fails, we'll initialize on first user interaction
+    log("Audio context initialization deferred (will initialize on user interaction)");
+  });
+}
+
+// Initialize audio on any user interaction (fallback)
+document.addEventListener('click', initializeAudioOnInteraction, { once: true });
+document.addEventListener('keydown', initializeAudioOnInteraction, { once: true });
+document.addEventListener('touchstart', initializeAudioOnInteraction, { once: true });
+
+// Auto-connect immediately on page load with default system prompt
+// Run after all variables and functions are defined
+console.log("[AUTO-CONNECT] Script loaded, setting up auto-connect...");
+
+// Fetch default system prompt from server
+async function loadDefaultSystemPrompt() {
+  try {
+    const response = await fetch('/api/default_prompt');
+    if (response.ok) {
+      const data = await response.json();
+      if (data.prompt && systemPromptInput) {
+        systemPromptInput.value = data.prompt;
+        log(`Loaded default system prompt from server: ${data.prompt.substring(0, 50)}...`);
+      }
+    }
+  } catch (err) {
+    log(`Failed to load default prompt: ${err.message}`);
+  }
+}
+
+// Use window.onload to ensure everything is ready
+window.addEventListener('load', async () => {
+  console.log("[AUTO-CONNECT] Window loaded, starting auto-connect...");
+  log("=== AUTO-CONNECT STARTING ===");
+  
+  // Load default system prompt from server if textarea is empty
+  if (systemPromptInput && !systemPromptInput.value.trim()) {
+    await loadDefaultSystemPrompt();
+  }
+  
+  try {
+    log(`systemPromptInput exists: ${!!systemPromptInput}`);
+    log(`systemPromptInput value: ${systemPromptInput ? systemPromptInput.value.substring(0, 50) : 'N/A'}...`);
+    
+    if (!systemPromptInput) {
+      log("ERROR: systemPromptInput not found!");
+      setConnectionStatus("disconnected");
+      return;
+    }
+    
+    pendingSystemPrompt = systemPromptInput.value.trim();
+    if (!pendingSystemPrompt) {
+      log("Warning: No system prompt found, using empty prompt");
+      pendingSystemPrompt = "";
+    }
+    log(`Pending system prompt: ${pendingSystemPrompt.substring(0, 50)}...`);
+    log(`connectVoiceWebSocket function exists: ${typeof connectVoiceWebSocket}`);
+    
+    if (typeof connectVoiceWebSocket !== 'function') {
+      log("ERROR: connectVoiceWebSocket is not a function!");
+      setConnectionStatus("disconnected");
+      return;
+    }
+    
+    setConnectionStatus("connecting");
+    log("Calling connectVoiceWebSocket()...");
+    connectVoiceWebSocket();
+    log("=== AUTO-CONNECT INITIATED ===");
+  } catch (e) {
+    log(`ERROR in auto-connect: ${e}`);
+    console.error("[AUTO-CONNECT] Error:", e);
+    setConnectionStatus("disconnected");
+  }
+});
+
+// Keep-alive ping every 30 seconds
+setInterval(() => {
+  if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+    voiceWs.send(JSON.stringify({ type: "ping" }));
+  }
+}, 30000);
+</script>
+</body>
+</html>

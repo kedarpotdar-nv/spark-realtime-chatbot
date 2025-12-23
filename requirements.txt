@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+websockets
+kokoro-tts
+kokoro
+soundfile
+numpy
+torch
+aiohttp
+python-multipart
+llm-sandbox[docker]
+# Additional backend dependencies (may be needed even with docker backend)
+podman
+kubernetes
