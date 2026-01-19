@@ -120,6 +120,12 @@ app.mount("/audio", StaticFiles(directory=str(AUDIO_DIR)), name="audio")
 # Routes
 # -----------------------------
 
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for Docker."""
+    return {"status": "ok"}
+
+
 @app.get("/api/default_prompt")
 async def get_default_prompt():
     """Get the default system prompt from prompts.py."""
