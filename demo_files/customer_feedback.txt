@@ -1,0 +1,14 @@
+RECENT CHURN REASONS (last 30 days):
+- "No offline mode. Can't use on flights. Switched to competitor." - Enterprise customer, $50K ARR
+- "Export is broken. Wasted 3 hours. Done." - Mid-market, $12K ARR  
+- "My team can't collaborate. Going back to Notion." - Startup, $8K ARR
+
+NPS DETRACTORS (Score 1-6):
+- "Offline mode or I'm out" (Score: 3)
+- "Fix the export already" (Score: 4)
+- "Why is this so slow?" (Score: 5)
+
+TOP SUPPORT TICKETS THIS MONTH:
+1. Offline mode requests - 47 tickets
+2. Export bugs - 34 tickets
+3. Team sharing - 28 tickets

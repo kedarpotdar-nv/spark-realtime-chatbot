@@ -1,264 +1,234 @@
-# Voice Chat Assistant - Streaming Edition
+# spark-realtime-chatbot
 
-An improved voice-to-voice chatbot with **streaming input** (real-time ASR), **streaming output** (streaming LLM responses + TTS), and **agent capabilities** including a coding assistant.
+A voice and vision AI assistant running locally on DGX Spark — streaming speech recognition, vision-language models, and text-to-speech, all on a single GB10.
 
-## Features
+![Demo](demo.png)
 
-- 🎤 **Streaming ASR**: Real-time speech-to-text transcription as you speak
-- 💬 **Streaming LLM**: Server-Sent Events (SSE) for streaming text responses
-- 🔊 **Streaming TTS**: Audio generation and playback using Kokoro TTS
-- 🤖 **Coding Assistant**: AI agent that generates and executes code in a sandbox
-- 🛠️ **Tool Calling**: Extensible tool system (weather, home assistant, etc.)
-- 💾 **Chat History**: Persistent conversation history with local storage
-- ⌨️ **Multiple Input Methods**: Voice input (hold SPACE) or text input
-- 🎨 **Modern UI**: Clean, responsive frontend with agent modals
+**Highlights:**
+- **Ultra-low latency**: ~320ms voice calls, ~850ms video calls (end-to-end)
+- **Runs entirely on-device**: No cloud APIs required
+- **Vision + Voice**: Video calls with real-time scene understanding (Qwen3-VL)
+- **Face Recognition**: Enroll and identify users on the fly
+- **GB10-optimized**: ASR, LLM, TTS, and vision all running on GPU
 
-## Architecture
+**Performance on DGX Spark:**
+| Component | Latency | RTF |
+|-----------|---------|-----|
+| ASR (faster-whisper) | ~200ms | 0.07x |
+| LLM (Qwen3-VL text) | ~65ms TTFT | — |
+| VLM (Qwen3-VL vision) | ~600ms | — |
+| TTS (Kokoro) | ~50ms | 0.03x |
 
-```
-ces-voice/
-├── server.py          # FastAPI backend with streaming support
-├── static/
-│   └── index.html    # Frontend UI (separated)
-├── audio_cache/       # Generated audio files (auto-created)
-├── requirements.txt   # Python dependencies
-├── launch.sh          # Launch script (HTTP)
-├── launch-https.sh    # Launch script (HTTPS)
-└── main-final.py      # Original reference implementation
-```
+*End-to-end: ~320ms voice calls, ~850ms video calls*
 
-## Prerequisites
+## Quick Start (Docker)
 
-1. **Python 3.8+**
-2. **ffmpeg** (for audio decoding)
-   - Ubuntu/Debian: `sudo apt install ffmpeg`
-   - macOS: `brew install ffmpeg`
-   - Windows: Download from [ffmpeg.org](https://ffmpeg.org/download.html)
-3. **Docker** (for code execution sandbox)
-   - Required for Coding Assistant agent
-   - Install from [docker.com](https://www.docker.com/get-started)
-4. **External Services**:
-   - **ASR Server**: OpenAI-compatible ASR API (e.g., faster-whisper server)
-   - **LLM Server**: OpenAI-compatible LLM API (e.g., llama-server)
+Docker is the recommended way to run this project. The container includes all dependencies pre-built for DGX Spark's GB10 (CUDA 13.0, sm_121).
 
-## Setup
+### 1. Setup llama.cpp
 
-### 1. Install Python Dependencies
+Build llama.cpp from source. See [llama.cpp build instructions](https://github.com/ggerganov/llama.cpp/blob/master/docs/build.md) for details.
+
+Download the models:
 
 ```bash
+# Qwen3-VL (Vision Language Model)
+curl -L -o Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf \
+    https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct-GGUF/resolve/main/Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf
+
+curl -L -o mmproj-Qwen3VL-30B-A3B-Instruct-Q8_0.gguf \
+    https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-30B-A3B-Instruct-Q8_0.gguf
+
+# Nemotron (Reasoning Model, optional)
+curl -L -o Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf \
+    https://huggingface.co/unsloth/Nemotron-3-Nano-30B-A3B-GGUF/resolve/main/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf
+```
+
+### 2. Start LLM Servers
+
+Start the LLM servers on the host in separate terminals:
+
+**Terminal 1 - VLM (Vision Language Model):**
+```bash
+./llama-server -m Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf \
+    --mmproj mmproj-Qwen3VL-30B-A3B-Instruct-Q8_0.gguf \
+    --host 0.0.0.0 --port 8080 \
+    -ngl 99 -c 8192 --threads 8 --threads-http 8 -fa on --cache-reuse 256
+```
+
+**Terminal 2 - Nemotron (Reasoning Model, optional):**
+```bash
+./llama-server -m Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf \
+    --host 0.0.0.0 --port 8005 \
+    -ngl 99 -c 32768 --threads 8 --threads-http 8 -fa on --cache-reuse 256
+```
+
+### 3. Build and Run
+
+```bash
+# Clone the repository
+git clone https://github.com/kedarpotdar-nv/spark-realtime-chatbot
+cd spark-realtime-chatbot
+
+# Build the Docker image
+docker build -t spark-realtime-chatbot .
+
+# Run (first time - downloads models)
+docker run --gpus all --net host -it --init \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -e HF_TOKEN=<your_hf_token> \
+    spark-realtime-chatbot
+
+# Run (subsequent - offline mode)
+docker run --gpus all --net host -it --init \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -e HF_HUB_OFFLINE=1 \
+    spark-realtime-chatbot
+```
+
+### 4. Open the App
+
+Navigate to **https://localhost:8443** in your browser.
+
+Since it's HTTPS, you can also access remotely via your Spark's IP: `https://<spark-ip>:8443`
+
+---
+
+## Local Development (Python)
+
+For development or non-Docker environments:
+
+### 1. Prerequisites
+
+- Python 3.10+
+- ffmpeg: `sudo apt install ffmpeg`
+
+### 2. Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/kedarpotdar-nv/spark-realtime-chatbot
+cd spark-realtime-chatbot
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-**Key dependencies:**
-- `fastapi`, `uvicorn[standard]`, `websockets` - Web framework and real-time communication
-- `kokoro-tts`, `kokoro` - Text-to-speech
-- `torch`, `numpy`, `soundfile` - Audio processing
-- `llm-sandbox[docker]` - Secure code execution sandbox
-- `aiohttp` - Async HTTP client
+### 3. Start Services
 
-**Note:** `podman` and `kubernetes` are optional dependencies for `llm-sandbox` but may be needed depending on your setup.
-
-### 2. Start External Services
-
-#### ASR Server (Speech-to-Text)
-
-You need an OpenAI-compatible ASR API server running. Example with faster-whisper:
-
+**ASR Server** (if not using local ASR):
 ```bash
-# Start faster-whisper server on port 8000
-# (Adjust command based on your faster-whisper setup)
+docker run --gpus=all --net host \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    fedirz/faster-whisper-server:latest-cuda
 ```
 
-Default configuration expects ASR at: `http://localhost:8000/v1/audio/transcriptions`
+**LLM Servers** - see steps 1-2 in Docker quickstart above.
 
-#### LLM Server (Language Model)
-
-You need an OpenAI-compatible LLM API server running. Example with llama-server:
+### 4. Launch
 
 ```bash
-# Example: Start llama-server
-./llama-server --model gpt-oss-120b-mxfp4-00001-of-00003.gguf --port 8080 -ngl 99
-```
-
-Default configuration expects LLM at: `http://localhost:8080/v1/chat/completions`
-
-### 3. Configure Environment Variables (Optional)
-
-Set these before launching (or use defaults):
-
-```bash
-# ASR Configuration
-export ASR_API_URL="http://localhost:8000/v1/audio/transcriptions"
-export ASR_API_KEY="dummy-key"  # Can be any non-empty string
-export ASR_MODEL="tiny.en"      # Model name for ASR API
-
-# LLM Configuration
-export LLM_SERVER_URL="http://localhost:8080/v1/chat/completions"
-export LLM_MODEL="gpt-4x-local"  # Must match your LLM server's model name
-export LLM_MAX_TOKENS="4096"      # Max tokens for responses (increased for code generation)
-export LLM_TEMP="0.7"             # Temperature (0.0-1.0)
-export LLM_REASONING_EFFORT="low" # "low", "medium", "high", or "off"
-
-# TTS Configuration
-export KOKORO_LANG="a"            # Language code (a = American English)
-export KOKORO_VOICE="af_bella"    # Voice name
-export KOKORO_SPEED="1.2"         # Speech speed multiplier
-
-# HuggingFace Cache Configuration
-export HF_HOME="/home/nvidia/hfcache"  # HF cache directory (defaults to /home/nvidia/hfcache)
-export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"  # Hub cache location
-
-# Server Configuration
-export PORT="8001"                # Port for ces-voice server (default: 8001)
-export FFMPEG_PATH="ffmpeg"       # Path to ffmpeg binary
-```
-
-### 4. Launch the Server
-
-#### Option A: Using Launch Script (Recommended)
-
-```bash
-# HTTP (for localhost)
-./launch.sh
-
-# HTTPS (for remote access - generates self-signed cert if needed)
+# HTTPS (recommended - required for microphone access)
 ./launch-https.sh
+
+# With local ASR (lower latency, no separate ASR server needed)
+./launch-https.sh --local-asr
+
+# With TTS overlap (experimental - starts TTS while LLM streams)
+./launch-https.sh --local-asr --tts-overlap
 ```
 
-#### Option B: Manual Launch
+Open **https://localhost:8443** in your browser.
 
-```bash
-uvicorn server:app --host 0.0.0.0 --port 8001
-```
+---
 
-### 5. Access the Application
+## Configuration
 
-- **Localhost**: `http://localhost:8001`
-- **HTTPS**: `https://localhost:8443` (if using launch-https.sh)
-- **Remote**: Use SSH port forwarding or HTTPS (see [DEPLOY.md](DEPLOY.md))
+Key environment variables (pass to Docker with `-e` or set before launching):
 
-⚠️ **Important**: Browsers require **HTTPS** (or `localhost`) for microphone access!
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLM_SERVER_URL` | `http://localhost:8080/v1/chat/completions` | LLM/VLM endpoint |
+| `NEMOTRON_SERVER_URL` | `http://localhost:8005/v1/chat/completions` | Reasoning model endpoint |
+| `ASR_MODEL` | `Systran/faster-distil-whisper-large-v3` | Whisper model for ASR |
+| `KOKORO_VOICE` | `af_bella` | TTS voice (`af_bella`, `af_heart`, etc.) |
+
+See `config.py` for all available options.
+
+---
 
 ## Usage
 
-1. **Connect**: Click "Connect" button or wait for auto-connect
-2. **Enable Tools**: Check boxes in "Capabilities" and "Agents" sections
-3. **Input Methods**:
-   - **Voice**: Hold SPACE bar to record, release to send
-   - **Text**: Type in the text input box and click "Send"
-4. **Coding Assistant**: Enable "Coding Assistant" checkbox, then ask to write code. A modal will open showing code generation and execution.
+1. **Connect**: The app auto-connects on load
+2. **Choose Mode**: Voice call or video call
+3. **Voice Input**: Hands-free with auto voice detection, or hold SPACE for push-to-talk
+4. **Enable Tools**: Check agents in the sidebar (reasoning assistant, markdown assistant)
+5. **Face Recognition**: Use video call mode to enroll/recognize faces
 
-## Features in Detail
+---
 
-### Capabilities (Basic Tools)
-- **Weather**: Get current weather for any location
-- **Home Assistant**: Control smart home devices (extensible)
+## Try It
 
-### Agents (Complex Tools)
-- **Coding Assistant**: 
-  - Generates code based on your request
-  - Executes code in a secure Docker sandbox
-  - Automatically fixes errors and retries
-  - Shows code and execution output in a modal UI
-  - Stores generated code in chat history
+**Whiteboard to README**
+- Draw a system diagram on a whiteboard or paper
+- Start a video call and show it to the camera
+- Say: *"Convert this whiteboard into a markdown README"*
 
-### Chat History
-- Conversations are saved to browser local storage
-- Switch between multiple chats using the left sidebar
-- Chat history persists across browser sessions
+**Architecture Review**
+- Sketch a system architecture diagram
+- Show it to the camera and ask: *"How can I improve this architecture?"*
+- Or: *"What's missing from this design?"*
 
-## API Endpoints
+**Fashion Advisor**
+- Start a video call
+- Ask: *"Am I dressed appropriately for a board meeting?"*
+- Or: *"What should I wear to a job interview?"*
 
-### WebSocket: `/ws/voice`
-Main WebSocket endpoint for voice interaction.
+**Face Recognition**
+- In video call mode, say: *"Remember my face as [your name]"*
+- End the call, start a new one
+- The bot will greet you by name
 
-**Messages:**
-- Binary: Audio chunks (WebM format)
-- JSON: `{"type": "set_tools", "tools": ["weather", "coding_assistant"]}` - Enable/disable tools
-- JSON: `{"type": "text_message", "text": "..."}` - Send text message
-- JSON: `{"type": "disconnect"}` - Disconnect
+---
 
-**Responses:**
-- `{"type": "asr_partial", "text": "..."}` - Live transcription
-- `{"type": "asr_final", "text": "..."}` - Final transcript
-- `{"type": "transient_response", "text": "..."}` - Streaming LLM response
-- `{"type": "final_response", "text": "..."}` - Final LLM response
-- `{"type": "agent_started", ...}` - Agent tool activated
-- `{"type": "agent_code_chunk", ...}` - Code generation streaming
-- `{"type": "agent_code_complete", ...}` - Code generation finished
-- Binary: Audio chunks for TTS
+## Architecture
 
-### POST: `/api/llm_stream`
-Streaming LLM endpoint using Server-Sent Events (SSE).
+This is a reference low-latency pipeline meant to be extended as needed.
 
-### POST: `/api/tts_stream`
-Streaming TTS endpoint.
+```
+Browser ──► FastAPI Server ──► llama.cpp (Qwen3-VL, Nemotron)
+                │
+                ├── ASR (faster-whisper)
+                ├── TTS (Kokoro)
+                └── Face Recognition (DeepFace)
+```
 
-## Troubleshooting
+Key files:
+- `server.py` - FastAPI backend with WebSocket handlers
+- `clients/` - ASR, LLM, TTS, VLM, face recognition clients
+- `static/` - Frontend (HTML/JS/CSS)
+- `tools.py` - Tool definitions
+- `prompts.py` - System prompts
 
-### Microphone Not Working
-- **Problem**: Browser blocks microphone access
-- **Solution**: Use `https://` or `http://localhost`. See [HTTPS_SETUP.md](HTTPS_SETUP.md) for HTTPS setup.
+---
 
-### ASR Not Working
-- **Problem**: No transcription appearing
-- **Solution**: 
-  - Verify ASR server is running: `curl http://localhost:8000/v1/audio/transcriptions`
-  - Check `ASR_API_URL` environment variable
-  - Ensure `ffmpeg` is installed and accessible
+## Acknowledgements
 
-### LLM Errors
-- **Problem**: "Connection refused" or "Model not found"
-- **Solution**:
-  - Verify LLM server is running: `curl http://localhost:8080/v1/models`
-  - Check `LLM_SERVER_URL` and `LLM_MODEL` match your server configuration
-  - See [LLM_SETUP.md](LLM_SETUP.md) for LLM server setup
+This project builds on these amazing open-source projects:
 
-### Code Execution Not Working
-- **Problem**: "Code execution not available" message
-- **Solution**:
-  - Install `llm-sandbox`: `pip install 'llm-sandbox[docker]'`
-  - Ensure Docker is running: `docker ps`
-  - Check Docker has permission to create containers
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) - LLM/VLM inference engine
+- [Qwen3-VL](https://github.com/QwenLM/Qwen2.5-VL) - Vision Language Model (Alibaba)
+- [Nemotron](https://huggingface.co/nvidia/Llama-3.1-Nemotron-Nano-8B-v1) - Reasoning model (NVIDIA)
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) - ASR (SYSTRAN)
+- [CTranslate2](https://github.com/OpenNMT/CTranslate2) - Inference engine (OpenNMT)
+- [Kokoro](https://github.com/hexgrad/kokoro) - Text-to-Speech
+- [DeepFace](https://github.com/serengil/deepface) - Face recognition
+- [Silero VAD](https://github.com/ricky0123/vad) - Voice Activity Detection
+- [spaCy](https://spacy.io/) - NLP processing
 
-### TTS Errors
-- **Problem**: No audio playback
-- **Solution**:
-  - Check browser console for errors
-  - Verify Kokoro models are loaded (check server logs)
-  - Try different `KOKORO_VOICE` values
 
-### Port Conflicts
-- **Problem**: "Address already in use"
-- **Solution**: Change `PORT` environment variable or stop conflicting service
 
-## Additional Documentation
-
-- [DEPLOY.md](DEPLOY.md) - Remote deployment guide
-- [HTTPS_SETUP.md](HTTPS_SETUP.md) - HTTPS/SSL configuration
-- [LLM_SETUP.md](LLM_SETUP.md) - LLM server setup guide
-- [TOOL_TESTING.md](TOOL_TESTING.md) - Testing tools and agents
-
-## Development
-
-### Project Structure
-- `server.py` - Main FastAPI application with WebSocket handlers
-- `static/index.html` - Frontend UI (HTML/CSS/JavaScript)
-- `requirements.txt` - Python dependencies
-- `launch.sh` / `launch-https.sh` - Launch scripts with environment setup
-
-### Key Components
-- **VoiceSession**: Manages WebSocket connections and conversation state
-- **FasterWhisperASR**: Handles ASR API communication
-- **LlamaCppClient**: Handles LLM API communication with streaming
-- **KokoroTTS**: Text-to-speech synthesis
-- **Tool System**: Extensible tool calling framework
-- **Agent System**: Complex tools with specialized UIs (e.g., Coding Assistant)
-
-## Notes
-
-- Conversation history is stored in browser `localStorage` (client-side)
-- Audio files are cached in `audio_cache/` directory
-- Code execution uses Docker containers via `llm-sandbox`
-- Requires external ASR and LLM servers (not included)
-- Microphone access requires HTTPS or localhost (browser security requirement)

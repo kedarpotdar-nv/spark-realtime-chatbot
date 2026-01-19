@@ -9,6 +9,10 @@ torch
 aiohttp
 python-multipart
 llm-sandbox[docker]
+# Face recognition
+deepface
+opencv-python
+
 # Additional backend dependencies (may be needed even with docker backend)
 podman
 kubernetes

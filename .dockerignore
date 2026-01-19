@@ -1,0 +1,45 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude
+.claude/
+
+# Backups
+*.backup
+
+# Local data (will be mounted as volumes)
+audio_cache/
+face_db.json
+*.pem
+*.key
+*.crt
+
+# Documentation (not needed at runtime)
+*.md
+DEPLOY.md
+HTTPS_SETUP.md
+LLM_SETUP.md
+TOOL_TESTING.md
+
+# Test files
+test-*.sh
+webcam_vlm_test.py
+webcam_vlm_web.py
+webcam-vlm/

@@ -1,1161 +1,45 @@
-import os
-import sys
-import uuid
-import subprocess
-import json
-import io
-import tempfile
-import asyncio
+"""spark-realtime-chatbot - Real-time Voice Chatbot Server.
+
+A WebSocket-based voice assistant using:
+- Faster-Whisper for ASR
+- llama.cpp or TensorRT-LLM for LLM
+- Kokoro for TTS
+"""
+
 import argparse
-from pathlib import Path
-from dataclasses import dataclass
-from typing import List, Dict, Any, AsyncGenerator, Optional
+import asyncio
+import json
+import os
+import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import numpy as np
-import torch
-import soundfile as sf
-import aiohttp
-from fastapi import FastAPI, UploadFile, File, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
-from kokoro import KPipeline
 
-# LLM Sandbox for code execution
-try:
-    from llm_sandbox import SandboxSession
-    SANDBOX_AVAILABLE = True
-except ImportError:
-    SANDBOX_AVAILABLE = False
-    print("[Warning] llm-sandbox not available. Code execution will be disabled.")
-
-
-# -----------------------------
-# Config
-# -----------------------------
-
-@dataclass
-class ASRConfig:
-    api_url: str = os.getenv("ASR_API_URL", "http://localhost:8000/v1/audio/transcriptions")
-    api_key: str = os.getenv("ASR_API_KEY", "dummy-key")  # API key for OpenAI-compatible server (can be any non-empty string)
-    model: str = os.getenv("ASR_MODEL", "Systran/faster-whisper-small.en")  # Model name for the API
-
-
-@dataclass
-class LLMConfig:
-    base_url: str = os.getenv("LLM_SERVER_URL", "http://localhost:8080/v1/chat/completions")
-    model: str = os.getenv("LLM_MODEL", "gpt-4x-local")
-    temperature: float = float(os.getenv("LLM_TEMP", "0.7"))
-    max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))  # Increased default for code generation
-    reasoning_effort: str = os.getenv("LLM_REASONING_EFFORT", "low")  # "low", "medium", "high", or "off"
-    backend: str = os.getenv("LLM_BACKEND", "llama")  # "llama" or "trtllm"
-
-
-@dataclass
-class VLMConfig:
-    """Vision Language Model configuration (Qwen3-VL via llama.cpp)"""
-    base_url: str = os.getenv("VLM_SERVER_URL", "http://localhost:8080/v1/chat/completions")
-    model: str = os.getenv("VLM_MODEL", "qwen3-vl")
-    temperature: float = float(os.getenv("VLM_TEMP", "0.3"))
-    max_tokens: int = int(os.getenv("VLM_MAX_TOKENS", "4000"))
-
-
-@dataclass
-class TTSConfig:
-    lang_code: str = os.getenv("KOKORO_LANG", "a")
-    voice: str = os.getenv("KOKORO_VOICE", "af_bella")
-    speed: float = float(os.getenv("KOKORO_SPEED", "1.2"))
-
-
-AUDIO_DIR = Path("audio_cache")
-AUDIO_DIR.mkdir(exist_ok=True)
-
-STATIC_DIR = Path("static")
-STATIC_DIR.mkdir(exist_ok=True)
-
-SAMPLE_RATE = 16000
-WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", Path.cwd())).resolve()
-
-# FFmpeg path (can be overridden via environment variable)
-FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
-
-
-def check_ffmpeg_available() -> bool:
-    """Check if ffmpeg is available."""
-    try:
-        proc = subprocess.run(
-            [FFMPEG_PATH, "-version"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=5
-        )
-        return proc.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return False
-
-
-# -----------------------------
-# Tooling support for OpenAI-compatible tool calling
-# -----------------------------
-
-# Available tools (OpenAI format) - registry of all possible tools
-ALL_TOOLS = {
-    # Capabilities (basic tools)
-    "weather": {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get the current weather for a location. Use this when the user asks about weather conditions.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "The city and state, e.g. San Francisco, CA or Santa Clara, CA"
-                    }
-                },
-                "required": ["location"]
-            }
-        }
-    },
-    "filesystem": None,  # Placeholder for future implementation
-    "coding_sandbox": None,  # Placeholder for future implementation
-    "calendar": None,  # Placeholder for future implementation
-    "home_assistant": None,  # Placeholder for future implementation
-    
-    # Agents (complex workflows)
-    "coding_assistant": {
-        "type": "function",
-        "function": {
-            "name": "coding_assistant",
-            "description": "A coding assistant agent that can write, modify, and analyze code. Use this when the user asks to write code, create APIs, modify codebases, or perform complex coding tasks. This opens a streaming code editor UI.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "The coding task description, e.g. 'Open my analytics portal codebase and write a new API for querying user data'"
-                    },
-                    "codebase_path": {
-                        "type": "string",
-                        "description": "Optional path to the codebase or project to work with"
-                    }
-                },
-                "required": ["task"]
-            }
-        }
-    },
-    "markdown_assistant": {
-        "type": "function",
-        "function": {
-            "name": "markdown_assistant",
-            "description": "A markdown documentation assistant that can write README files, documentation, guides, and other markdown documents. Use this when the user asks to write documentation, create a README, write guides, or produce any markdown content.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "The documentation task description, e.g. 'Write a README for my project' or 'Create API documentation for the user service'"
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": "Optional context about the project or topic to document"
-                    }
-                },
-                "required": ["task"]
-            }
-        }
-    },
-}
-
-def get_enabled_tools(enabled_tool_ids: List[str]) -> List[Dict[str, Any]]:
-    """Get list of tool definitions for enabled tool IDs."""
-    tools = []
-    for tool_id in enabled_tool_ids:
-        if tool_id in ALL_TOOLS and ALL_TOOLS[tool_id] is not None:
-            tools.append(ALL_TOOLS[tool_id])
-    return tools
-
-async def execute_tool(tool_name: str, arguments: Dict[str, Any]) -> str:
-    """Execute a tool and return the result as a string."""
-    if tool_name == "get_weather":
-        location = arguments.get("location", "Santa Clara, CA")
-        # Mock weather API - replace with real API call later
-        # For demo: return mock data based on location
-        if "santa clara" in location.lower() or "california" in location.lower():
-            return json.dumps({
-                "location": "Santa Clara, CA",
-                "temperature": 55,
-                "unit": "fahrenheit",
-                "condition": "sunny",
-                "description": "55 degrees and sunny"
-            })
-        else:
-            return json.dumps({
-                "location": location,
-                "temperature": 65,
-                "unit": "fahrenheit",
-                "condition": "partly cloudy",
-                "description": "65 degrees and partly cloudy"
-            })
-    
-    elif tool_name == "coding_assistant":
-        # Agent tools return a special marker that triggers UI opening
-        # The actual execution happens in the agent response handler
-        task = arguments.get("task", "")
-        codebase_path = arguments.get("codebase_path", "")
-        return json.dumps({
-            "agent_type": "coding_assistant",
-            "task": task,
-            "codebase_path": codebase_path,
-            "status": "initiated"
-        })
-    
-    elif tool_name == "markdown_assistant":
-        # Agent tools return a special marker that triggers UI opening
-        task = arguments.get("task", "")
-        context = arguments.get("context", "")
-        return json.dumps({
-            "agent_type": "markdown_assistant",
-            "task": task,
-            "context": context,
-            "status": "initiated"
-        })
-    
-    return json.dumps({"error": f"Unknown tool: {tool_name}"})
-
-
-# -----------------------------
-# ASR
-# -----------------------------
-
-class FasterWhisperASR:
-    def __init__(self, cfg: ASRConfig):
-        print(f"[ASR] Using faster-whisper server at '{cfg.api_url}'")
-        print(f"[ASR] Model: {cfg.model}")
-        self.cfg = cfg
-        self.streaming_enabled = os.getenv("ASR_STREAMING", "true").lower() == "true"
-
-    def _audio_to_wav_bytes(self, audio: np.ndarray) -> bytes:
-        """Convert numpy audio array to WAV file bytes."""
-        # Ensure audio is float32 in range [-1, 1]
-        audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
-        
-        # Write to BytesIO as WAV
-        wav_buffer = io.BytesIO()
-        sf.write(wav_buffer, audio, SAMPLE_RATE, subtype="PCM_16", format="WAV")
-        return wav_buffer.getvalue()
-
-    def _clean_repetitive_text(self, text: str) -> str:
-        """Remove repetitive patterns from ASR output (Whisper hallucination fix)."""
-        if not text:
-            return text
-        
-        words = text.split()
-        if len(words) < 6:
-            return text
-        
-        # Detect repeated words (e.g., "okay, okay, okay, okay")
-        word_counts = {}
-        for word in words:
-            clean_word = word.lower().strip('.,!?')
-            word_counts[clean_word] = word_counts.get(clean_word, 0) + 1
-        
-        # If any single word is more than 50% of the text, it's likely hallucination
-        for word, count in word_counts.items():
-            if count > len(words) * 0.5 and count > 5:
-                print(f"[ASR] Detected repetitive hallucination: '{word}' repeated {count} times")
-                # Return just the first occurrence of the pattern
-                first_occurrence = text.split(word)[0] + word
-                return first_occurrence.strip(' ,')
-        
-        # Detect repeated phrases (e.g., "let's do that, let's do that")
-        # Check for 2-4 word patterns
-        for pattern_len in range(2, 5):
-            if len(words) >= pattern_len * 3:
-                pattern = ' '.join(words[:pattern_len]).lower()
-                pattern_count = text.lower().count(pattern)
-                if pattern_count > 3:
-                    print(f"[ASR] Detected repetitive phrase: '{pattern}' repeated {pattern_count} times")
-                    # Return just first 1-2 occurrences
-                    return pattern.capitalize()
-        
-        return text
-
-    async def transcribe(self, audio: np.ndarray) -> str:
-        """Transcribe audio using OpenAI-compatible API."""
-        if audio.size == 0:
-            return ""
-        
-        # Skip silent audio (likely no actual speech)
-        audio_max = np.abs(audio).max()
-        SILENCE_THRESHOLD = 0.001
-        if audio_max < SILENCE_THRESHOLD:
-            return ""
-        
-        # Limit audio length to prevent hallucination (max 30 seconds)
-        MAX_AUDIO_SAMPLES = SAMPLE_RATE * 30
-        if len(audio) > MAX_AUDIO_SAMPLES:
-            print(f"[ASR] Trimming audio from {len(audio)/SAMPLE_RATE:.1f}s to 30s")
-            audio = audio[:MAX_AUDIO_SAMPLES]
-        
-        # Convert audio to WAV bytes
-        wav_bytes = self._audio_to_wav_bytes(audio)
-        
-        # Prepare multipart form data
-        data = aiohttp.FormData()
-        wav_file = io.BytesIO(wav_bytes)
-        wav_file.seek(0)
-        data.add_field('file', wav_file, filename='audio.wav', content_type='audio/wav')
-        data.add_field('model', self.cfg.model)
-        data.add_field('language', 'en')
-        
-        print(f"[ASR] Sending request to {self.cfg.api_url} with model={self.cfg.model}")
-        
-        # Make API request
-        headers = {'Authorization': f'Bearer {self.cfg.api_key}'}
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.cfg.api_url,
-                    data=data,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30)
-                ) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        print(f"[ASR] API error {resp.status}: {error_text}")
-                        return ""
-                    
-                    result = await resp.json()
-                    text = result.get('text', '').strip()
-                    
-                    # Clean up repetitive hallucinations
-                    text = self._clean_repetitive_text(text)
-                    
-                    if text:
-                        print(f"[ASR] '{text}'")
-                    return text
-        except asyncio.TimeoutError:
-            print(f"[ASR] Request timeout")
-            return ""
-        except Exception as e:
-            print(f"[ASR] Error: {e}")
-            return ""
-
-
-def decode_webm_to_pcm_f32(input_path: Path, target_sr: int = SAMPLE_RATE) -> np.ndarray:
-    """Decode a single .webm file to float32 mono PCM."""
-    if not check_ffmpeg_available():
-        raise RuntimeError(
-            f"ffmpeg not found at '{FFMPEG_PATH}'. "
-            f"Please install ffmpeg or set FFMPEG_PATH environment variable. "
-            f"Install with: sudo apt install ffmpeg (Ubuntu/Debian) or brew install ffmpeg (macOS)"
-        )
-    
-    cmd = [
-        FFMPEG_PATH,
-        "-y",
-        "-i", str(input_path),
-        "-ac", "1",
-        "-ar", str(target_sr),
-        "-f", "f32le",
-        "pipe:1",
-    ]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if proc.returncode != 0:
-        stderr = proc.stderr.decode("utf-8", errors="ignore")
-        print("[ffmpeg stderr]\n", stderr)
-        raise RuntimeError(f"ffmpeg failed to decode audio: {stderr[:200]}")
-    audio = np.frombuffer(proc.stdout, dtype=np.float32)
-    return audio
-
-
-def decode_webm_bytes_to_pcm_f32(data: bytes, target_sr: int = SAMPLE_RATE) -> np.ndarray:
-    """Decode WebM bytes to float32 mono PCM using ffmpeg."""
-    if not data:
-        return np.zeros(0, dtype=np.float32)
-
-    # Check for WebM header (should start with 0x1A45DFA3 or similar)
-    if len(data) < 4:
-        print(f"[decode] Warning: WebM data too short: {len(data)} bytes")
-        return np.zeros(0, dtype=np.float32)
-    
-    # Check if it looks like WebM (starts with EBML header)
-    webm_markers = [b'\x1a\x45\xdf\xa3', b'webm', b'WEBM']
-    has_webm_header = any(data.startswith(marker) for marker in webm_markers)
-    if not has_webm_header:
-        print(f"[decode] Warning: Data doesn't appear to be WebM (first 20 bytes: {data[:20].hex()})")
-
-    # Save to temp file for more reliable decoding (WebM needs headers)
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as tmp:
-        tmp.write(data)
-        tmp_path = tmp.name
-    
-    try:
-        if not check_ffmpeg_available():
-            raise RuntimeError(
-                f"ffmpeg not found at '{FFMPEG_PATH}'. "
-                f"Please install ffmpeg or set FFMPEG_PATH environment variable. "
-                f"Install with: sudo apt install ffmpeg (Ubuntu/Debian) or brew install ffmpeg (macOS)"
-            )
-        
-        cmd = [
-            FFMPEG_PATH,
-            "-y",
-            "-i", tmp_path,
-            "-ac", "1",
-            "-ar", str(target_sr),
-            "-f", "f32le",
-            "pipe:1",
-        ]
-        proc = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if proc.returncode != 0:
-            stderr = proc.stderr.decode("utf-8", errors="ignore")
-            print(f"[ffmpeg stderr]\n{stderr}")
-            # Try to extract useful error info
-            if "Invalid data found" in stderr or "moov atom not found" in stderr:
-                print(f"[decode] WebM file appears incomplete or corrupted")
-            raise RuntimeError(f"ffmpeg failed to decode audio: {stderr[:200]}")
-        
-        audio = np.frombuffer(proc.stdout, dtype=np.float32)
-        return audio
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except:
-            pass
-
-
-# -----------------------------
-# LLM client with streaming support
-# -----------------------------
-
-class LlamaCppClient:
-    def __init__(self, cfg: LLMConfig):
-        self.cfg = cfg
-        self.is_trtllm = cfg.backend.lower() == "trtllm"
-        if self.is_trtllm:
-            print(f"[LLM] Using TensorRT-LLM backend (trtllm-serve)")
-        else:
-            print(f"[LLM] Using standard OpenAI-compatible backend")
-
-    def _extract_final_channel(self, content: str) -> str:
-        """Extract final channel content from reasoning-style outputs."""
-        if "<|channel|>final<|message|>" in content:
-            content = content.split("<|channel|>final<|message|>", 1)[1]
-        if "<|end|>" in content:
-            content = content.split("<|end|>", 1)[0]
-        return content.strip()
-
-    async def complete(self, messages: List[Dict[str, Any]]) -> str:
-        """Non-streaming completion."""
-        payload = {
-            "model": self.cfg.model,
-            "messages": messages,
-            "temperature": self.cfg.temperature,
-            "max_tokens": self.cfg.max_tokens,
-            "stream": False,
-        }
-        if self.cfg.reasoning_effort and self.cfg.reasoning_effort.lower() != "off":
-            payload["reasoning_effort"] = self.cfg.reasoning_effort.lower()
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(self.cfg.base_url, json=payload) as resp:
-                data = await resp.json()
-
-        raw = data["choices"][0]["message"]["content"]
-        return self._extract_final_channel(raw)
-
-    async def stream_complete(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> AsyncGenerator[str, None]:
-        """Streaming completion - yields text chunks as they arrive.
-        Filters out analysis/reasoning chunks and only streams final channel content.
-        
-        Args:
-            messages: List of message dicts
-            tools: Optional list of tool definitions in OpenAI format
-        """
-        payload = {
-            "model": self.cfg.model,
-            "messages": messages,
-            "temperature": self.cfg.temperature,
-            "max_tokens": self.cfg.max_tokens,
-            "stream": True,
-        }
-        # Only add reasoning_effort if it's not "off"
-        if self.cfg.reasoning_effort and self.cfg.reasoning_effort.lower() != "off":
-            payload["reasoning_effort"] = self.cfg.reasoning_effort.lower()
-        
-        # Add tools if provided (OpenAI format)
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"  # Let model decide when to use tools
-            print(f"[LLM] Sending request with {len(tools)} tool(s): {[t['function']['name'] for t in tools]}")
-
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(self.cfg.base_url, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                    print(f"[LLM] Request status: {resp.status}")
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        print(f"[LLM] Server error response: {error_text[:500]}")
-                        yield f"data: {json.dumps({'error': f'LLM server error {resp.status}: {error_text[:200]}'})}\n\n"
-                        return
-
-                    buffer = ""
-                    accumulated_content = ""  # Accumulate full response for final extraction
-                    in_final_channel = False  # Track if we're in final channel
-                    final_marker = "<|channel|>final<|message|>"
-                    end_marker = "<|end|>"
-                    line_count = 0
-                    chunk_count = 0
-                    # Accumulate tool calls (OpenAI streaming format)
-                    accumulated_tool_calls = {}  # Map from tool_call index to tool_call dict
-                    
-                    print(f"[LLM] Starting to read stream...")
-                    try:
-                        async for line in resp.content:
-                            line_count += 1
-                            if line_count <= 5:
-                                print(f"[LLM] Line {line_count}: {repr(line[:200]) if line else 'empty'}")
-                            if not line:
-                                continue
-                            
-                            line_decoded = line.decode('utf-8', errors='ignore')
-                            buffer += line_decoded
-                            
-                            # Process complete lines
-                            while '\n' in buffer:
-                                line_str, buffer = buffer.split('\n', 1)
-                                line_str = line_str.strip()
-                                
-                                # Handle different streaming formats
-                                if not line_str:
-                                    continue
-                                
-                                # Check for SSE format (data: prefix) - standard OpenAI format
-                                if line_str.startswith('data: '):
-                                    data_str = line_str[6:]  # Remove 'data: ' prefix
-                                elif self.is_trtllm:
-                                    # TensorRT-LLM might not use 'data: ' prefix
-                                    # Try parsing as JSON directly (trtllm-serve may stream raw JSON)
-                                    data_str = line_str
-                                    if chunk_count == 0:
-                                        print(f"[LLM] TRTLLM: First chunk format: {repr(line_str[:200])}")
-                                else:
-                                    continue  # Skip non-SSE lines for standard backend
-                                
-                                if data_str == '[DONE]':
-                                    return
-                                
-                                try:
-                                    data = json.loads(data_str)
-                                    chunk_count += 1
-                                    
-                                    # Log first few chunks for debugging trtllm format
-                                    if self.is_trtllm and chunk_count <= 3:
-                                        print(f"[LLM] TRTLLM chunk {chunk_count} keys: {list(data.keys())}")
-                                        if "choices" in data and data.get("choices"):
-                                            print(f"[LLM] TRTLLM choices structure: {json.dumps(data.get('choices', [{}])[0] if data.get('choices') else {}, indent=2)[:300]}")
-                                    
-                                    # Handle empty choices array
-                                    choices = data.get("choices", [])
-                                    if not choices:
-                                        # Skip chunks with empty choices (can happen with some backends)
-                                        continue
-                                    
-                                    choice = choices[0]
-                                    finish_reason = choice.get("finish_reason")
-                                    delta = choice.get("delta", {})
-                                    
-                                    # TensorRT-LLM might use different delta structure
-                                    # Check for alternative field names
-                                    if self.is_trtllm and not delta and "content" in data:
-                                        # trtllm might put content directly in data
-                                        delta = {"content": data.get("content", "")}
-                                    elif self.is_trtllm and not delta and "text" in data:
-                                        # trtllm might use "text" instead of "content"
-                                        delta = {"content": data.get("text", "")}
-                                    
-                                    # Debug logging disabled - uncomment for debugging
-                                    # if chunk_count <= 3 or finish_reason:
-                                    #     print(f"[LLM] Chunk {chunk_count} full JSON: {json.dumps(data, indent=2)}")
-                                    # if chunk_count <= 3:
-                                    #     print(f"[LLM] Chunk {chunk_count} finish_reason: {finish_reason}, delta keys: {list(delta.keys())}")
-                                    
-                                    # Separate handling for content vs reasoning_content
-                                    actual_content = delta.get("content")  # Actual final content
-                                    # trtllm uses "reasoning" instead of "reasoning_content"
-                                    reasoning_content = delta.get("reasoning_content") or delta.get("reasoning", "")
-                                    tool_calls = delta.get("tool_calls")  # Tool calls (OpenAI format)
-                                    
-                                    # TRTLLM debug logging (first 3 chunks only)
-                                    if self.is_trtllm and chunk_count <= 3:
-                                        print(f"[TRTLLM] Chunk {chunk_count}: content={bool(actual_content)}, reasoning={bool(reasoning_content)}, tool_calls={bool(tool_calls)}")
-                                    
-                                    # Check if stream is done
-                                    if finish_reason:
-                                        print(f"[LLM] Stream finished with reason: {finish_reason}, accumulated: {len(accumulated_content)} chars")
-                                        # TRTLLM: Log accumulated content summary
-                                        if self.is_trtllm and accumulated_content:
-                                            print(f"[TRTLLM] Accumulated {len(accumulated_content)} chars of reasoning")
-                                            # Note: trtllm-serve doesn't support OpenAI-style tool calls
-                                            # Tool calls only work with llama.cpp backend
-                                        
-                                        # If finish_reason is "tool_calls", we have complete tool calls to execute
-                                        if finish_reason == "tool_calls" and accumulated_tool_calls:
-                                            # Yield tool calls for execution
-                                            tool_calls_list = [accumulated_tool_calls[idx] for idx in sorted(accumulated_tool_calls.keys())]
-                                            yield f"data: {json.dumps({'tool_calls_complete': tool_calls_list})}\n\n"
-                                            return  # Return early - tool execution will happen in caller
-                                        # Process current chunk first, then let loop exit naturally
-                                        # The end-of-stream logic will run after the loop exits
-                                    
-                                    # Debug logging disabled - uncomment for debugging
-                                    # if chunk_count <= 3:
-                                    #     print(f"[LLM] Chunk {chunk_count} delta: {delta}")
-                                    #     print(f"[LLM]   - actual_content: {repr(actual_content[:50]) if actual_content else 'None'}")
-                                    #     print(f"[LLM]   - reasoning_content: {repr(reasoning_content[:50]) if reasoning_content else 'None'}")
-                                    #     print(f"[LLM]   - tool_calls: {tool_calls}")
-                                    
-                                    # Handle tool calls in delta (OpenAI streaming format)
-                                    # Tool calls come in chunks: delta.tool_calls is an array
-                                    # Each element has: index, id, type, function (with name and arguments)
-                                    # Arguments come as partial JSON strings that need to be accumulated
-                                    if tool_calls:
-                                        for tool_call_delta in tool_calls:
-                                            idx = tool_call_delta.get("index")
-                                            if idx is not None:
-                                                if idx not in accumulated_tool_calls:
-                                                    accumulated_tool_calls[idx] = {
-                                                        "id": tool_call_delta.get("id", ""),
-                                                        "type": tool_call_delta.get("type", "function"),
-                                                        "function": {"name": "", "arguments": ""}
-                                                    }
-                                                # Accumulate function name and arguments
-                                                if "function" in tool_call_delta:
-                                                    func_delta = tool_call_delta["function"]
-                                                    if "name" in func_delta:
-                                                        accumulated_tool_calls[idx]["function"]["name"] = func_delta["name"]
-                                                    if "arguments" in func_delta:
-                                                        accumulated_tool_calls[idx]["function"]["arguments"] += func_delta["arguments"]
-                                    
-                                    # Only accumulate actual content, not reasoning
-                                    if actual_content:
-                                        accumulated_content += actual_content
-                                        # Debug logging disabled - uncomment for debugging
-                                        # if chunk_count <= 5:
-                                        #     print(f"[LLM] Accumulated actual content ({len(accumulated_content)} chars): {accumulated_content[:100]}")
-                                        
-                                        # Harmony API (trtllm-serve) tool call detection during streaming
-                                        if self.is_trtllm:
-                                            harmony_commentary_marker = "<|channel|>commentary<|message|>"
-                                            if harmony_commentary_marker in accumulated_content:
-                                                # Extract JSON after the marker
-                                                marker_pos = accumulated_content.find(harmony_commentary_marker)
-                                                json_start = marker_pos + len(harmony_commentary_marker)
-                                                json_str = accumulated_content[json_start:].strip()
-                                                
-                                                # Try to extract complete JSON
-                                                try:
-                                                    # Find complete JSON object
-                                                    brace_count = 0
-                                                    json_end = 0
-                                                    in_string = False
-                                                    escape_next = False
-                                                    for i, char in enumerate(json_str):
-                                                        if escape_next:
-                                                            escape_next = False
-                                                            continue
-                                                        if char == '\\':
-                                                            escape_next = True
-                                                            continue
-                                                        if char == '"' and not escape_next:
-                                                            in_string = not in_string
-                                                        if not in_string:
-                                                            if char == '{':
-                                                                brace_count += 1
-                                                            elif char == '}':
-                                                                brace_count -= 1
-                                                                if brace_count == 0:
-                                                                    json_end = i + 1
-                                                                    break
-                                                    
-                                                    if json_end > 0:
-                                                        tool_call_json = json_str[:json_end]
-                                                        tool_data = json.loads(tool_call_json)
-                                                        print(f"[LLM] Harmony API tool call detected during streaming: {tool_data}")
-                                                        
-                                                        # Convert Harmony format to OpenAI tool call format
-                                                        # Detect which tool based on JSON keys and available tools
-                                                        tool_name = None
-                                                        
-                                                        # Method 1: Check if tool_data explicitly contains tool name
-                                                        if "name" in tool_data:
-                                                            tool_name = tool_data.pop("name")
-                                                        elif "function" in tool_data:
-                                                            tool_name = tool_data.pop("function")
-                                                        
-                                                        # Method 2: Infer from parameter keys
-                                                        if not tool_name:
-                                                            if "codebase_path" in tool_data:
-                                                                tool_name = "coding_assistant"
-                                                            elif "context" in tool_data:
-                                                                tool_name = "markdown_assistant"
-                                                        
-                                                        # Method 3: Check which tools are available and match
-                                                        if not tool_name and tools:
-                                                            available_tool_names = [t.get("function", {}).get("name", "") for t in tools]
-                                                            # Prefer markdown_assistant if it's available and task mentions doc/readme/markdown
-                                                            task_lower = tool_data.get("task", "").lower()
-                                                            if "markdown_assistant" in available_tool_names:
-                                                                if any(kw in task_lower for kw in ["readme", "documentation", "markdown", "document", "guide", "wiki"]):
-                                                                    tool_name = "markdown_assistant"
-                                                            if not tool_name and "coding_assistant" in available_tool_names:
-                                                                tool_name = "coding_assistant"
-                                                        
-                                                        # Default fallback
-                                                        if not tool_name:
-                                                            tool_name = "coding_assistant"
-                                                        
-                                                        print(f"[LLM] Harmony API detected tool: {tool_name}")
-                                                        
-                                                        openai_tool_call = {
-                                                            "id": f"call_{uuid.uuid4().hex[:8]}",
-                                                            "type": "function",
-                                                            "function": {
-                                                                "name": tool_name,
-                                                                "arguments": json.dumps(tool_data)
-                                                            }
-                                                        }
-                                                        
-                                                        # Yield as tool_calls_complete and return
-                                                        yield f"data: {json.dumps({'tool_calls_complete': [openai_tool_call]})}\n\n"
-                                                        return  # Return early - tool execution will happen in caller
-                                                except (json.JSONDecodeError, ValueError) as e:
-                                                    # JSON might be incomplete, continue accumulating
-                                                    if chunk_count <= 5:
-                                                        print(f"[LLM] Harmony API tool call JSON incomplete (will retry): {json_str[:100]}")
-                                        
-                                        # Check if we've entered the final channel
-                                        if final_marker in accumulated_content:
-                                            if not in_final_channel:
-                                                # Just entered final channel
-                                                marker_pos = accumulated_content.rfind(final_marker)
-                                                if marker_pos != -1:
-                                                    in_final_channel = True
-                                                    # Extract content after marker
-                                                    content_after_marker = accumulated_content[marker_pos + len(final_marker):]
-                                                    # Check for end marker
-                                                    if end_marker in content_after_marker:
-                                                        content_after_marker = content_after_marker.split(end_marker, 1)[0]
-                                                        in_final_channel = False
-                                                    # Yield what we have
-                                                    if content_after_marker:
-                                                        yield f"data: {json.dumps({'content': content_after_marker})}\n\n"
-                                            elif in_final_channel:
-                                                # Already in final channel - check for end marker in this chunk
-                                                if actual_content and end_marker in actual_content:
-                                                    # End marker found - extract final part
-                                                    final_part = actual_content.split(end_marker, 1)[0]
-                                                    if final_part:
-                                                        yield f"data: {json.dumps({'content': final_part})}\n\n"
-                                                    in_final_channel = False
-                                                elif actual_content:
-                                                    # Continue streaming final channel content
-                                                    yield f"data: {json.dumps({'content': actual_content})}\n\n"
-                                        else:
-                                            # No channel markers found - this LLM doesn't use channel markers
-                                            # Only yield actual content, not reasoning_content
-                                            if actual_content:  # Only yield if it's actual content, not reasoning
-                                                yield f"data: {json.dumps({'content': actual_content})}\n\n"
-                                            # Don't yield reasoning_content chunks - wait for final content
-                                    elif reasoning_content:
-                                        # Reasoning content - accumulate for potential analysis
-                                        accumulated_content += reasoning_content
-                                        # Don't yield reasoning content yet - wait for actual content or end of stream
-                                        
-                                except json.JSONDecodeError as e:
-                                    if line_count <= 10:
-                                        print(f"[LLM] JSON decode error on line {line_count}: {repr(line_str[:100])}, error: {e}")
-                                    continue
-                    
-                        print(f"[LLM] Stream ended: {chunk_count} chunks processed, {len(accumulated_content)} chars accumulated")
-                        # Debug logging disabled - uncomment for debugging
-                        # print(f"[LLM] Full accumulated content: {repr(accumulated_content)}")
-                        
-                        # Harmony API (trtllm-serve) uses <|channel|>commentary<|message|> markers with JSON tool calls
-                        if self.is_trtllm and accumulated_content:
-                            harmony_commentary_marker = "<|channel|>commentary<|message|>"
-                            if harmony_commentary_marker in accumulated_content:
-                                # Extract JSON after the marker
-                                marker_pos = accumulated_content.find(harmony_commentary_marker)
-                                json_start = marker_pos + len(harmony_commentary_marker)
-                                json_str = accumulated_content[json_start:].strip()
-                                
-                                # Try to extract complete JSON (might be truncated)
-                                # Look for complete JSON object
-                                try:
-                                    # Try to find the end of JSON (could be incomplete)
-                                    brace_count = 0
-                                    json_end = 0
-                                    in_string = False
-                                    escape_next = False
-                                    for i, char in enumerate(json_str):
-                                        if escape_next:
-                                            escape_next = False
-                                            continue
-                                        if char == '\\':
-                                            escape_next = True
-                                            continue
-                                        if char == '"' and not escape_next:
-                                            in_string = not in_string
-                                        if not in_string:
-                                            if char == '{':
-                                                brace_count += 1
-                                            elif char == '}':
-                                                brace_count -= 1
-                                                if brace_count == 0:
-                                                    json_end = i + 1
-                                                    break
-                                    
-                                    if json_end > 0:
-                                        tool_call_json = json_str[:json_end]
-                                        tool_data = json.loads(tool_call_json)
-                                        print(f"[LLM] Harmony API tool call detected: {tool_data}")
-                                        
-                                        # Convert Harmony format to OpenAI tool call format
-                                        # Harmony format: {"task": "...", "codebase_path": "..."}
-                                        # OpenAI format: {"id": "...", "type": "function", "function": {"name": "...", "arguments": "..."}}
-                                        
-                                        # Determine tool name from the context (we know it's coding_assistant from the request)
-                                        tool_name = "coding_assistant"  # Default, could be inferred from tools list
-                                        if tools:
-                                            # Check which tool matches the structure
-                                            for tool_def in tools:
-                                                func_name = tool_def.get("function", {}).get("name", "")
-                                                if func_name == "coding_assistant":
-                                                    tool_name = func_name
-                                                    break
-                                        
-                                        # Create OpenAI-format tool call
-                                        openai_tool_call = {
-                                            "id": f"call_{uuid.uuid4().hex[:8]}",
-                                            "type": "function",
-                                            "function": {
-                                                "name": tool_name,
-                                                "arguments": json.dumps(tool_data)
-                                            }
-                                        }
-                                        
-                                        # Yield as tool_calls_complete
-                                        yield f"data: {json.dumps({'tool_calls_complete': [openai_tool_call]})}\n\n"
-                                        return  # Return early - tool execution will happen in caller
-                                except (json.JSONDecodeError, ValueError) as e:
-                                    print(f"[LLM] Failed to parse Harmony API tool call JSON: {e}")
-                                    print(f"[LLM] JSON string: {json_str[:200]}")
-                        
-                        # If we accumulated content but never found channel markers, check if it's reasoning or actual content
-                        # Reasoning models output reasoning first, then final content
-                        # But tool calls might be embedded in reasoning content
-                        if accumulated_content and not in_final_channel and final_marker not in accumulated_content:
-                            # Check if accumulated_content contains a tool call (JSON with "tool" key)
-                            stripped = accumulated_content.strip()
-                            if stripped.startswith("{") and "tool" in stripped:
-                                # Looks like a tool call JSON - yield it
-                                # Debug logging disabled
-                                # print(f"[LLM] Accumulated content looks like tool call: {accumulated_content[:200]}")
-                                yield f"data: {json.dumps({'content': accumulated_content})}\n\n"
-                            else:
-                                # Might be reasoning with embedded tool call - try to extract JSON
-                                import re
-                                # Look for JSON objects with "tool" key in the reasoning
-                                # Try multiple patterns to catch different JSON formats
-                                json_patterns = [
-                                    r'\{[^{}]*"tool"[^{}]*\}',  # Simple pattern
-                                    r'\{[^{}]*"tool"[^{}]*"[^"]*"[^{}]*\}',  # With quoted values
-                                    r'\{"tool"\s*:\s*"[^"]+"[^}]*\}',  # More specific
-                                ]
-                                json_matches = []
-                                for pattern in json_patterns:
-                                    matches = re.findall(pattern, accumulated_content)
-                                    if matches:
-                                        json_matches.extend(matches)
-                                
-                                if json_matches:
-                                    # Found tool call JSON in reasoning
-                                    tool_json = json_matches[-1]  # Take the last match (most complete)
-                                    print(f"[LLM] Extracted tool call from reasoning: {tool_json}")
-                                    yield f"data: {json.dumps({'content': tool_json})}\n\n"
-                                else:
-                                    # Check if reasoning mentions tools/filesystem operations
-                                    # Use reasoning as response for voice-to-voice conversations
-                                    # This allows normal conversations to work even when model only outputs reasoning
-                                    # Debug logging disabled
-                                    # print(f"[LLM] Using reasoning as response: {accumulated_content[:200]}")
-                                    yield f"data: {json.dumps({'content': accumulated_content})}\n\n"
-                        elif not accumulated_content:
-                            print(f"[LLM] No content accumulated at all - stream ended with no content")
-                    except Exception as stream_error:
-                        print(f"[LLM] Error reading stream: {stream_error}")
-                        import traceback
-                        traceback.print_exc()
-                        if 'accumulated_content' in locals() and accumulated_content:
-                            yield f"data: {json.dumps({'content': accumulated_content})}\n\n"
-                        else:
-                            yield f"data: {json.dumps({'error': f'Stream error: {stream_error}'})}\n\n"
-            except asyncio.TimeoutError:
-                print(f"[LLM] Request timeout after 60 seconds")
-                yield f"data: {json.dumps({'error': 'LLM request timeout'})}\n\n"
-            except Exception as e:
-                print(f"[LLM] Exception in stream_complete: {e}")
-                import traceback
-                traceback.print_exc()
-                yield f"data: {json.dumps({'error': str(e)})}\n\n"
-
-
-# -----------------------------
-# Vision Language Model Client (Qwen3-VL)
-# -----------------------------
-
-class VLMClient:
-    """Client for Vision Language Model (Qwen3-VL via llama.cpp)"""
-    
-    def __init__(self, cfg: VLMConfig):
-        self.cfg = cfg
-        print(f"[VLM] Using {cfg.model} at {cfg.base_url}")
-    
-    async def analyze_image(self, image_base64: str, prompt: str, system_prompt: str = None, tools: list = None) -> dict:
-        """Analyze an image with the VLM and return response with potential tool calls."""
-        
-        if system_prompt is None:
-            system_prompt = "You are a helpful visual assistant. Describe what you see and answer questions about images."
-        
-        # Build messages with image
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
-                ]
-            }
-        ]
-        
-        payload = {
-            "model": self.cfg.model,
-            "messages": messages,
-            "temperature": self.cfg.temperature,
-            "max_tokens": self.cfg.max_tokens,
-            "stream": False
-        }
-        
-        # Add tools if provided
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.cfg.base_url,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=120)
-                ) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        print(f"[VLM] Error {resp.status}: {error_text[:200]}")
-                        return {"content": f"VLM error: {resp.status}", "tool_calls": []}
-                    
-                    result = await resp.json()
-                    
-                    # Extract response
-                    choice = result.get("choices", [{}])[0]
-                    message = choice.get("message", {})
-                    content = message.get("content", "")
-                    tool_calls = message.get("tool_calls", [])
-                    
-                    # Check for text-based tool calls in content (Qwen format)
-                    if content and ("<tool_call>" in content or '"name":' in content):
-                        try:
-                            # Try to parse tool call from content
-                            import re
-                            tool_match = re.search(r'<tool_call>\s*(\{.*?\})\s*</tool_call>', content, re.DOTALL)
-                            if tool_match:
-                                tool_json = json.loads(tool_match.group(1))
-                                tool_calls = [{
-                                    "id": f"call_{uuid.uuid4().hex[:8]}",
-                                    "type": "function",
-                                    "function": {
-                                        "name": tool_json.get("name", ""),
-                                        "arguments": json.dumps(tool_json.get("arguments", tool_json))
-                                    }
-                                }]
-                                # Remove tool call from content
-                                content = re.sub(r'<tool_call>.*?</tool_call>', '', content, flags=re.DOTALL).strip()
-                        except Exception as e:
-                            print(f"[VLM] Error parsing text tool call: {e}")
-                    
-                    print(f"[VLM] Response: {len(content) if content else 0} chars, {len(tool_calls) if tool_calls else 0} tool calls")
-                    return {"content": content or "", "tool_calls": tool_calls or []}
-                    
-        except Exception as e:
-            print(f"[VLM] Error: {e}")
-            import traceback
-            traceback.print_exc()
-            return {"content": f"VLM error: {str(e)}", "tool_calls": []}
-
-
-# -----------------------------
-# Kokoro TTS with streaming support
-# -----------------------------
-
-class KokoroTTS:
-    def __init__(self, cfg: TTSConfig):
-        print(f"[TTS] Loading Kokoro pipeline (lang={cfg.lang_code}, voice={cfg.voice})...")
-        self.cfg = cfg
-        self.pipeline = KPipeline(lang_code=cfg.lang_code)
-
-    def synth_to_file(self, text: str, out_path: Path) -> None:
-        """Synthesize text to audio file."""
-        if not text.strip():
-            sf.write(str(out_path), np.zeros(1600, dtype=np.float32), 16000)
-            return
-
-        generator = self.pipeline(
-            text,
-            voice=self.cfg.voice,
-            speed=self.cfg.speed,
-            split_pattern=r"\n+",
-        )
-
-        chunks = []
-        for _, _, audio in generator:
-            if isinstance(audio, torch.Tensor):
-                audio = audio.detach().cpu().numpy()
-            audio = audio.astype("float32")
-            chunks.append(audio)
-
-        if not chunks:
-            sf.write(str(out_path), np.zeros(1600, dtype=np.float32), 16000)
-            return
-
-        audio = np.concatenate(chunks)
-        sr = 24000
-        sf.write(str(out_path), audio, sr, subtype="PCM_16")
-
-    async def synth_stream(self, text: str) -> AsyncGenerator[bytes, None]:
-        """Stream audio as WAV file chunks."""
-        if not text.strip():
-            yield b""
-            return
-
-        # Generate full audio first (Kokoro generates in chunks anyway)
-        generator = self.pipeline(
-            text,
-            voice=self.cfg.voice,
-            speed=self.cfg.speed,
-            split_pattern=r"\n+",
-        )
-
-        chunks = []
-        for _, _, audio in generator:
-            if isinstance(audio, torch.Tensor):
-                audio = audio.detach().cpu().numpy()
-            audio = audio.astype("float32")
-            chunks.append(audio)
-
-        if not chunks:
-            yield b""
-            return
-
-        # Concatenate all chunks
-        audio = np.concatenate(chunks)
-        sr = 24000
-
-        # Write to BytesIO as WAV
-        wav_buffer = io.BytesIO()
-        sf.write(wav_buffer, audio, sr, subtype="PCM_16", format="WAV")
-        wav_data = wav_buffer.getvalue()
-        
-        # Stream in chunks
-        chunk_size = 8192
-        for i in range(0, len(wav_data), chunk_size):
-            yield wav_data[i:i + chunk_size]
-
-    def synth_stream_chunks(self, text: str, voice: str = None):
-        """Stream audio chunks as they're generated (for WebSocket).
-        Yields (audio_data: bytes, sample_rate: int) tuples.
-        
-        Args:
-            text: Text to synthesize
-            voice: Voice to use (defaults to self.cfg.voice)
-        """
-        if not text.strip():
-            return
-
-        sr = 24000
-        voice_to_use = voice or self.cfg.voice
-        
-        # Split text into sentences for more incremental generation
-        import re
-        sentences = re.split(r'([.!?]\s+)', text)
-        # Recombine sentences with their punctuation
-        text_chunks = []
-        for i in range(0, len(sentences) - 1, 2):
-            if i + 1 < len(sentences):
-                text_chunks.append(sentences[i] + sentences[i + 1])
-            else:
-                text_chunks.append(sentences[i])
-        if len(sentences) % 2 == 1:
-            text_chunks.append(sentences[-1])
-        
-        # If no sentence breaks, split by commas or just use whole text
-        if len(text_chunks) == 1 and len(text) > 100:
-            text_chunks = re.split(r'(,\s+)', text)
-            text_chunks = [text_chunks[i] + (text_chunks[i+1] if i+1 < len(text_chunks) else '') 
-                          for i in range(0, len(text_chunks), 2)]
-        
-        if not text_chunks:
-            text_chunks = [text]
-        
-        print(f"[TTS] Splitting into {len(text_chunks)} chunks for streaming")
-        
-        # Generate and yield audio for each text chunk
-        for chunk_idx, text_chunk in enumerate(text_chunks):
-            if not text_chunk.strip():
-                continue
-                
-            print(f"[TTS] Generating chunk {chunk_idx + 1}/{len(text_chunks)}: '{text_chunk[:30]}...'")
-            
-            # Generate audio for this chunk
-            generator = self.pipeline(
-                text_chunk.strip(),
-                voice=voice_to_use,
-                speed=self.cfg.speed,
-                split_pattern=r"\n+",
-            )
-
-            for _, _, audio in generator:
-                if isinstance(audio, torch.Tensor):
-                    audio = audio.detach().cpu().numpy()
-                audio = audio.astype("float32")
-                
-                # Convert to int16 PCM
-                audio_int16 = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
-                audio_bytes = audio_int16.tobytes()
-                
-                print(f"[TTS] Yielding chunk {chunk_idx + 1}: {len(audio_bytes)} bytes ({len(audio_int16)/sr:.2f}s)")
-                
-                # Yield audio data with sample rate immediately
-                yield (audio_bytes, sr)
+# Local modules
+from config import (
+    ASRConfig, LLMConfig, VLMConfig, NemotronConfig, TTSConfig,
+    AUDIO_DIR, STATIC_DIR, SAMPLE_RATE, WORKSPACE_ROOT, FFMPEG_PATH
+)
+from audio import check_ffmpeg_available, decode_webm_bytes_to_pcm_f32
+from tools import get_enabled_tools, execute_tool
+from clients import (
+    HTTPSessionManager,
+    create_asr,
+    LlamaCppClient,
+    VLMClient,
+    NemotronClient,
+    KokoroTTS,
+)
+from clients.http_session import set_http_manager
+
+# Import system prompt
+from prompts import DEFAULT_SYSTEM_PROMPT
 
 
 # -----------------------------
@@ -1163,7 +47,7 @@ class KokoroTTS:
 # -----------------------------
 
 # Global models (initialized at startup)
-asr: FasterWhisperASR = None
+asr = None  # FasterWhisperASR or LocalWhisperASR based on ASR_MODE
 llm: LlamaCppClient = None
 tts: KokoroTTS = None
 
@@ -1183,7 +67,11 @@ conversation_history: List[Dict[str, str]] = [
 async def lifespan(app: FastAPI):
     """Initialize models on startup."""
     global asr, llm, tts
-    
+
+    # Initialize shared HTTP session manager first (used by all clients)
+    http_manager = HTTPSessionManager()
+    set_http_manager(http_manager)
+
     # Check ffmpeg availability at startup
     if not check_ffmpeg_available():
         print(f"⚠️  WARNING: ffmpeg not found at '{FFMPEG_PATH}'")
@@ -1193,12 +81,17 @@ async def lifespan(app: FastAPI):
         print(f"   - Or set FFMPEG_PATH environment variable to ffmpeg location")
     else:
         print(f"✅ ffmpeg found at '{FFMPEG_PATH}'")
-    
-    asr = FasterWhisperASR(ASRConfig())
+
+    asr = create_asr(ASRConfig())
+    # Warmup ASR model to eliminate cold-start latency
+    if hasattr(asr, 'warmup'):
+        asr.warmup()
     llm = LlamaCppClient(LLMConfig())
     tts = KokoroTTS(TTSConfig())
     yield
-    # Cleanup if needed
+    # Cleanup: close shared HTTP session
+    if http_manager:
+        await http_manager.close()
 
 
 # Parse command-line arguments before creating app
@@ -1234,6 +127,90 @@ async def get_default_prompt():
     return {"prompt": DEFAULT_SYSTEM_PROMPT}
 
 
+# -----------------------------
+# Face Recognition API
+# -----------------------------
+
+@app.post("/api/face/enroll")
+async def enroll_face(request: Request):
+    """Enroll a new face for recognition.
+
+    Body: {"name": "Person Name", "image": "base64_image_data"}
+    """
+    try:
+        from clients.face import get_face_recognizer
+        data = await request.json()
+        name = data.get("name")
+        image_b64 = data.get("image")
+
+        if not name or not image_b64:
+            return {"success": False, "error": "Missing name or image"}
+
+        recognizer = get_face_recognizer()
+        success = recognizer.enroll_face(name, image_b64)
+
+        if success:
+            return {"success": True, "message": f"Enrolled {name}"}
+        else:
+            return {"success": False, "error": "No face detected in image"}
+    except Exception as e:
+        print(f"[Face API] Enroll error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/face/recognize")
+async def recognize_faces(request: Request):
+    """Recognize faces in an image.
+
+    Body: {"image": "base64_image_data"}
+    """
+    try:
+        from clients.face import get_face_recognizer
+        data = await request.json()
+        image_b64 = data.get("image")
+
+        if not image_b64:
+            return {"success": False, "error": "Missing image"}
+
+        recognizer = get_face_recognizer()
+        faces = recognizer.recognize_faces(image_b64)
+
+        return {"success": True, "faces": faces}
+    except Exception as e:
+        print(f"[Face API] Recognize error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/face/list")
+async def list_enrolled_faces():
+    """List all enrolled faces."""
+    try:
+        from clients.face import get_face_recognizer
+        recognizer = get_face_recognizer()
+        names = recognizer.list_enrolled()
+        return {"success": True, "faces": names}
+    except Exception as e:
+        print(f"[Face API] List error: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.delete("/api/face/{name}")
+async def delete_face(name: str):
+    """Delete an enrolled face."""
+    try:
+        from clients.face import get_face_recognizer
+        recognizer = get_face_recognizer()
+        success = recognizer.delete_face(name)
+
+        if success:
+            return {"success": True, "message": f"Deleted {name}"}
+        else:
+            return {"success": False, "error": f"Face '{name}' not found"}
+    except Exception as e:
+        print(f"[Face API] Delete error: {e}")
+        return {"success": False, "error": str(e)}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     """Serve the frontend HTML."""
@@ -1257,7 +234,7 @@ class VoiceSession:
         self.is_recording = False
         self.audio_context_initialized = False
         self.selected_voice = os.getenv("KOKORO_VOICE", "af_bella")  # Default voice
-        self.enabled_tools = ["weather"]  # Default: weather tool enabled
+        self.enabled_tools = []  # Default: no tools enabled
         
         # Import system prompt from prompts.py
         from prompts import DEFAULT_SYSTEM_PROMPT
@@ -1416,271 +393,30 @@ class VoiceSession:
         await self.stream_tts(text, is_transient=True)
 
     async def send_final_response(self, text: str):
-        """Send final response and stream TTS."""
+        """Send final response and stream TTS sentence-by-sentence for lower latency."""
         print(f"[Voice Session] send_final_response called with: {text[:100]}...")
         await self.send_message("final_response", {"text": text})
-        print(f"[Voice Session] final_response message sent, starting TTS...")
-        await self.stream_tts(text, is_transient=False)
-        print(f"[Voice Session] TTS completed")
-    
-    async def _stream_to_code_editor(self, text: str):
-        """Stream text to code editor character by character to simulate typing."""
-        # Send initial empty state
-        await self.send_message("agent_code_chunk", {"content": "", "done": False})
-        
-        # Stream in chunks (simulate typing effect)
-        chunk_size = 10  # Characters per chunk
-        for i in range(0, len(text), chunk_size):
-            chunk = text[i:i + chunk_size]
-            await self.send_message("agent_code_chunk", {"content": chunk, "done": False})
-            await asyncio.sleep(0.05)  # Small delay for typing effect
-        
-        # Signal completion
-        await self.send_message("agent_code_chunk", {"content": "", "done": True})
-    
-    async def _execute_and_fix_code(self, code: str, task: str, max_iterations: int = 3):
-        """Execute code in sandbox and fix errors if needed."""
-        if not SANDBOX_AVAILABLE:
-            print(f"[Voice Session] _execute_and_fix_code called but SANDBOX_AVAILABLE is False")
-            return
-        
-        print(f"[Voice Session] _execute_and_fix_code: code length={len(code)}, task={task[:100]}")
-        iteration = 0
-        current_code = code
-        
-        while iteration < max_iterations:
-            iteration += 1
-            print(f"[Voice Session] Executing code (iteration {iteration}/{max_iterations})...")
-            print(f"[Voice Session] Code to execute:\n{current_code[:200]}...")
-            
-            # Send execution status to UI
-            await self.send_message("agent_code_chunk", {
-                "content": f"\n\n// Executing code (attempt {iteration})...\n",
-                "done": False
-            })
-            
-            try:
-                # Execute code in sandbox
-                import asyncio
-                import time
-                # Run sandbox creation in executor to avoid blocking
-                loop = asyncio.get_event_loop()
-                
-                def _cleanup_stopped_containers():
-                    """Best-effort cleanup of exited containers before retry."""
-                    try:
-                        import docker
-                        client = docker.from_env()
-                        stopped = client.containers.list(filters={"status": "exited"}, all=True)
-                        for container in stopped:
-                            try:
-                                cid = container.id[:12]
-                                print(f"[Voice Session] Removing stopped container: {cid}")
-                                container.remove(force=True)
-                            except Exception as rm_err:
-                                print(f"[Voice Session] Could not remove container {cid}: {rm_err}")
-                        time.sleep(1)
-                    except Exception as cleanup_err:
-                        print(f"[Voice Session] Container cleanup failed (non-fatal): {cleanup_err}")
-                
-                def create_and_run():
-                    max_retries = 3
-                    
-                    # Common config for all attempts
-                    session_kwargs = dict(
-                        lang="python",
-                        backend="docker",            # be explicit
-                        image="python:3.12-slim",    # known-good base image
-                        keep_template=True,          # reuse template containers to avoid re-downloading base image
-                        verbose=True,
-                        # Note: skip_environment_setup was causing issues - sandbox expects venv to exist
-                        # keep_template=True allows reusing the base image/container, avoiding re-downloads
-                    )
-                    
-                    for retry in range(max_retries):
-                        try:
-                            if retry > 0:
-                                print(f"[Voice Session] Attempting to clean up stopped containers before retry...")
-                                _cleanup_stopped_containers()
-                            
-                            print(f"[Voice Session] Creating SandboxSession (attempt {retry + 1}/{max_retries})...")
-                            
-                            with SandboxSession(**session_kwargs) as session:
-                                print(f"[Voice Session] SandboxSession created successfully")
-                                print(f"[Voice Session] Running code in sandbox...")
-                                result = session.run(current_code)
-                                return result
-                        
-                        except Exception as e:
-                            error_str = str(e)
-                            print(f"[Voice Session] SandboxSession error on attempt {retry + 1}: {error_str}")
-                            
-                            # Detect the Docker 409 / not running pattern
-                            is_409_conflict = (
-                                "409" in error_str and "not running" in error_str
-                            ) or (
-                                "APIError" in type(e).__name__ and "409" in error_str
-                            )
-                            
-                            if is_409_conflict and retry < max_retries - 1:
-                                print(f"[Voice Session] Container conflict detected, will retry... (attempt {retry + 1}/{max_retries})")
-                                continue
-                            
-                            # Non-retryable or out-of-retries
-                            raise
-                
-                # Run with timeout
-                try:
-                    result = await asyncio.wait_for(
-                        loop.run_in_executor(None, create_and_run),
-                        timeout=60.0
-                    )
-                    print(
-                        f"[Voice Session] Execution complete: "
-                        f"exit_code={result.exit_code}, "
-                        f"stdout length={len(result.stdout) if result.stdout else 0}, "
-                        f"stderr length={len(result.stderr) if result.stderr else 0}"
-                    )
-                except asyncio.TimeoutError:
-                    error_msg = "Code execution timed out after 60 seconds"
-                    print(f"[Voice Session] {error_msg}")
-                    await self.send_message("agent_code_chunk", {
-                        "content": f"\n\n// Error: {error_msg}\n",
-                        "done": True
-                    })
-                    break
-                
-                if result.exit_code == 0:
-                    # Success - show output
-                    output = result.stdout if result.stdout else "Code executed successfully (no output)"
-                    print(f"[Voice Session] Code executed successfully. Output: {output[:200]}...")
-                    await self.send_message("agent_code_chunk", {
-                        "content": f"\n\n// Execution successful:\n{output}\n",
-                        "done": False
-                    })
-                    # Send final done message
-                    await self.send_message("agent_code_chunk", {
-                        "content": "",
-                        "done": True
-                    })
-                    print(f"[Voice Session] Execution complete - sent done message")
-                    break
-                else:
-                    # Error - try to fix
-                    error_output = result.stderr if result.stderr else "Unknown error"
-                    print(f"[Voice Session] Code execution failed: {error_output}")
-                    
-                    await self.send_message("agent_code_chunk", {
-                        "content": f"\n\n// Error occurred:\n{error_output}\n",
-                        "done": False
-                    })
-                    
-                    if iteration < max_iterations:
-                        # Ask LLM to fix the code
-                        await self.send_message("agent_code_chunk", {
-                            "content": "\n// Attempting to fix code...\n",
-                            "done": False
-                        })
-                        
-                        fix_messages = [
-                            {
-                                "role": "system",
-                                "content": """You are a coding assistant. Fix the code based on the error message.
+        print(f"[Voice Session] final_response message sent, starting sentence-by-sentence TTS...")
 
-CRITICAL INSTRUCTIONS:
-- Return ONLY the fixed code. No explanations, no markdown formatting, no reasoning text.
-- Do NOT think out loud or show your reasoning process.
-- Fix the code directly and output it immediately.
-- Keep reasoning minimal - focus on producing working code.
-- Only include code comments if they clarify the fix."""
-                            },
-                            {
-                                "role": "user",
-                                "content": f"Original task: {task}\n\nCurrent code:\n```python\n{current_code}\n```\n\nError:\n{error_output}\n\nFix the code:"
-                            }
-                        ]
-                        
-                        # Use medium reasoning_effort for code fixing as well
-                        code_gen_config = LLMConfig()
-                        code_gen_config.reasoning_effort = "medium"
-                        code_gen_llm = LlamaCppClient(code_gen_config)
-                        
-                        # Get fixed code
-                        fixed_code = ""
-                        reasoning_accumulated = ""
-                        async for chunk in code_gen_llm.stream_complete(fix_messages, tools=None):
-                            if chunk.startswith("data: "):
-                                try:
-                                    data = json.loads(chunk[6:])
-                                    # Handle both content and reasoning_content
-                                    if "content" in data and data["content"]:
-                                        fixed_code += data["content"]
-                                    elif "reasoning_content" in data and data["reasoning_content"]:
-                                        reasoning_accumulated += data["reasoning_content"]
-                                except json.JSONDecodeError:
-                                    pass
-                        
-                        # If no content but we have reasoning, use reasoning as fallback
-                        if not fixed_code and reasoning_accumulated:
-                            print(f"[Voice Session] No content received for fix, using reasoning_content as fallback ({len(reasoning_accumulated)} chars)")
-                            fixed_code = reasoning_accumulated
-                        
-                        print(f"[Voice Session] Fixed code generation complete: {len(fixed_code)} chars accumulated")
-                        
-                        # Process fixed code
-                        if fixed_code and fixed_code.strip():
-                            fixed_code = llm._extract_final_channel(fixed_code)
-                            fixed_code = fixed_code.replace("<|channel|>analysis<|message|>", "")
-                            fixed_code = fixed_code.replace("<|channel|>final<|message|>", "")
-                            fixed_code = fixed_code.replace("<|end|>", "")
-                            fixed_code = fixed_code.replace("<|start|>assistant", "")
-                            fixed_code = fixed_code.replace("```python", "").replace("```", "").strip()
-                            
-                            if fixed_code:
-                                print(f"[Voice Session] Fixed code received: {len(fixed_code)} chars")
-                                # Send status message to execution output section first
-                                await self.send_message("agent_code_chunk", {
-                                    "content": f"\n\n// Fixed code (attempt {iteration + 1}):\n",
-                                    "done": False
-                                })
-                                # Replace entire code editor with fixed version
-                                await self.send_message("agent_code_update", {
-                                    "content": fixed_code,
-                                    "done": False
-                                })
-                                current_code = fixed_code
-                                print(f"[Voice Session] Retrying execution with fixed code (iteration {iteration + 1})...")
-                                continue
-                        else:
-                            print(f"[Voice Session] No fixed code received after LLM call")
-                    
-                    # If we've exhausted iterations, show final error
-                    await self.send_message("agent_code_chunk", {
-                        "content": f"\n// Could not fix after {max_iterations} attempts. Last error: {error_output}\n",
-                        "done": True
-                    })
-                    break
-                        
-            except Exception as e:
-                error_msg = str(e)
-                import traceback
-                traceback.print_exc()
-                print(f"[Voice Session] Sandbox execution error: {error_msg}")
-                print(f"[Voice Session] Error type: {type(e).__name__}")
-                
-                # Provide helpful error message
-                if "409" in error_msg and "not running" in error_msg:
-                    helpful_msg = f"Container conflict: A previous container is in a stopped state.\n\n// The sandbox will retry automatically. If this persists, clean up containers:\n// docker container prune -f"
-                elif "docker" in error_msg.lower() or "connection" in error_msg.lower():
-                    helpful_msg = f"Sandbox error: {error_msg}\n\n// Make sure Docker is running: sudo systemctl start docker (or 'docker ps' to test)"
-                else:
-                    helpful_msg = f"Sandbox error: {error_msg}"
-                
-                await self.send_message("agent_code_chunk", {
-                    "content": f"\n\n// {helpful_msg}\n",
-                    "done": True
-                })
-                break
+        # Split into sentences for faster TTS start
+        sentences, remaining = self._extract_complete_sentences(text)
+
+        # Add any remaining fragment
+        if remaining.strip():
+            sentences.append(remaining.strip())
+
+        if not sentences:
+            # Fallback: use whole text if no sentences found
+            sentences = [text]
+
+        print(f"[Voice Session] TTS pipeline: {len(sentences)} sentence(s)")
+
+        for i, sentence in enumerate(sentences):
+            if sentence.strip():
+                print(f"[Voice Session] TTS sentence {i+1}/{len(sentences)}: '{sentence[:40]}...'")
+                await self.stream_tts(sentence.strip(), is_transient=False)
+
+        print(f"[Voice Session] TTS completed ({len(sentences)} sentences)")
 
     async def stream_tts(self, text: str, is_transient: bool = False, voice: str = None):
         """Stream TTS audio chunks."""
@@ -1777,6 +513,132 @@ CRITICAL INSTRUCTIONS:
                     traceback.print_exc()
                     await self.send_message("error", {"error": f"TTS error: {error_msg}"})
 
+    def _extract_complete_sentences(self, text: str) -> tuple:
+        """Extract complete sentences from text buffer.
+
+        Returns (complete_sentences, remaining_buffer).
+        A sentence is complete if it ends with . ! or ? followed by space or end of string.
+        """
+        if not text:
+            return [], ""
+
+        import re
+        # Pattern: sentence ending punctuation followed by space or end
+        # Avoid splitting on abbreviations like "Dr.", "Mr.", "etc."
+        sentences = []
+
+        # Simple approach: split on . ! ? followed by space
+        # Keep the punctuation with the sentence
+        pattern = r'([.!?])\s+'
+        parts = re.split(pattern, text)
+
+        # Reconstruct sentences (parts alternate: text, punct, text, punct, ...)
+        current = ""
+        for i, part in enumerate(parts):
+            if i % 2 == 0:  # Text part
+                current += part
+            else:  # Punctuation part
+                current += part
+                sentences.append(current.strip())
+                current = ""
+
+        # Whatever is left is incomplete
+        remaining = current.strip()
+
+        return sentences, remaining
+
+    async def stream_llm_with_tts(self, messages: list, tools: list = None) -> tuple:
+        """Stream LLM response with overlapped TTS generation.
+
+        Starts TTS generation for each sentence while LLM continues streaming.
+        Uses a queue to process TTS in order while LLM runs in parallel.
+
+        Returns: (status, tool_calls, full_response)
+        """
+        sentence_buffer = ""
+        full_response = ""
+        sentence_count = 0
+
+        # Queue for sentences to be processed by TTS
+        tts_queue = asyncio.Queue()
+        tts_done = asyncio.Event()
+
+        async def tts_worker():
+            """Background worker that processes TTS queue in order."""
+            while True:
+                try:
+                    # Wait for sentence or done signal
+                    sentence = await asyncio.wait_for(tts_queue.get(), timeout=0.1)
+                    if sentence is None:  # Poison pill - we're done
+                        break
+                    await self.stream_tts(sentence, is_transient=False)
+                    tts_queue.task_done()
+                except asyncio.TimeoutError:
+                    if tts_done.is_set() and tts_queue.empty():
+                        break
+                    continue
+                except Exception as e:
+                    print(f"[TTS Worker] Error: {e}")
+                    break
+
+        # Start TTS worker
+        tts_task = asyncio.create_task(tts_worker())
+
+        try:
+            async for chunk in llm.stream_complete(messages, tools=tools):
+                if chunk.startswith("data: "):
+                    try:
+                        data = json.loads(chunk[6:])
+
+                        # Handle tool calls - stop TTS and return for tool processing
+                        if "tool_calls_complete" in data:
+                            tts_done.set()
+                            await tts_queue.put(None)  # Signal worker to stop
+                            await tts_task
+                            return ("tool_calls", data["tool_calls_complete"], full_response)
+
+                        if "content" in data and data["content"]:
+                            content = data["content"]
+                            sentence_buffer += content
+                            full_response += content
+
+                            # Send transient response to show text as it streams
+                            await self.send_message("transient_response", {"text": full_response})
+
+                            # Check for complete sentences
+                            sentences, sentence_buffer = self._extract_complete_sentences(sentence_buffer)
+
+                            for sentence in sentences:
+                                if sentence.strip():
+                                    sentence_count += 1
+                                    print(f"[TTS Pipeline] Queuing sentence {sentence_count}: '{sentence[:50]}...'")
+                                    # Queue for TTS - doesn't block LLM streaming!
+                                    await tts_queue.put(sentence)
+
+                    except json.JSONDecodeError:
+                        pass
+
+            # Handle any remaining text in buffer
+            if sentence_buffer.strip():
+                sentence_count += 1
+                print(f"[TTS Pipeline] Queuing final fragment {sentence_count}: '{sentence_buffer[:50]}...'")
+                await tts_queue.put(sentence_buffer.strip())
+
+            # Signal TTS worker we're done and wait for it to finish
+            tts_done.set()
+            await tts_queue.put(None)  # Poison pill
+            await tts_task
+
+            print(f"[TTS Pipeline] Completed: {sentence_count} sentences, {len(full_response)} chars total")
+            return ("complete", None, full_response)
+
+        except Exception as e:
+            print(f"[TTS Pipeline] Error: {e}")
+            tts_done.set()
+            await tts_queue.put(None)
+            await tts_task
+            raise
+
     async def process_user_message(self, user_text: str):
         """Process user message through LLM pipeline."""
         if not user_text or not user_text.strip():
@@ -1797,7 +659,32 @@ CRITICAL INSTRUCTIONS:
             enabled_tool_defs = get_enabled_tools(self.enabled_tools)
             print(f"[Voice Session] Starting LLM stream with {len(messages_for_llm)} messages")
             print(f"[Voice Session] Enabled tools: {self.enabled_tools} -> {[t['function']['name'] for t in enabled_tool_defs]}")
-            
+
+            # Check if TTS/LLM overlap is enabled and we're in simple conversation mode (no tools)
+            tts_config = TTSConfig()
+            if tts_config.overlap_llm and not enabled_tool_defs:
+                print(f"[Voice Session] Using TTS/LLM overlap pipeline (no tools enabled)")
+                status, tool_calls, full_response = await self.stream_llm_with_tts(messages_for_llm, tools=None)
+
+                if status == "complete" and full_response:
+                    # Clean up response markers
+                    full_response = llm._extract_final_channel(full_response)
+                    full_response = full_response.replace("<|channel|>analysis<|message|>", "")
+                    full_response = full_response.replace("<|channel|>final<|message|>", "")
+                    full_response = full_response.replace("<|end|>", "")
+                    full_response = full_response.replace("<|start|>assistant", "")
+                    full_response = full_response.strip()
+
+                    if full_response:
+                        # Add to conversation history
+                        self.conversation_history.append({"role": "assistant", "content": full_response})
+                        # Send final text message (TTS already done in pipeline)
+                        await self.send_message("final_response", {"text": full_response})
+                        print(f"[Voice Session] Overlap pipeline complete: {len(full_response)} chars")
+                        return
+
+                print(f"[Voice Session] Overlap pipeline returned empty response, continuing...")
+
             async for chunk in llm.stream_complete(messages_for_llm, tools=enabled_tool_defs if enabled_tool_defs else None):
                 chunk_count += 1
                 raw_chunks.append(chunk[:100])  # Store first 100 chars for debugging
@@ -1817,12 +704,18 @@ CRITICAL INSTRUCTIONS:
                             is_agent_tool = False
                             for tc in tool_calls:
                                 func = tc.get("function", {})
-                                if func.get("name") in ["coding_assistant", "markdown_assistant"]:
+                                if func.get("name") in ["markdown_assistant", "reasoning_assistant"]:
                                     is_agent_tool = True
                                     break
                             
                             if is_agent_tool:
-                                feedback_msg = "On it."
+                                # Custom feedback for reasoning
+                                for tc in tool_calls:
+                                    if tc.get("function", {}).get("name") == "reasoning_assistant":
+                                        feedback_msg = "Let me think through this..."
+                                        break
+                                else:
+                                    feedback_msg = "On it."
                             else:
                                 feedback_msg = "Looking that up for you."
                             
@@ -1920,120 +813,7 @@ CRITICAL INSTRUCTIONS:
                                 except json.JSONDecodeError:
                                     pass
                             
-                            if is_agent_tool and agent_type == "coding_assistant":
-                                # For coding assistant, make a separate LLM call to generate code
-                                print(f"[Voice Session] Making separate LLM call for code generation (task: {agent_task[:100]}...)")
-                                
-                                # Create a focused prompt for code generation
-                                # Emphasize direct code output with minimal reasoning
-                                code_generation_messages = [
-                                    {
-                                        "role": "system",
-                                        "content": """You are a coding assistant. Your goal is to generate code quickly and directly.
-
-CRITICAL INSTRUCTIONS:
-- Output ONLY executable code. No explanations, no markdown formatting, no reasoning text.
-- Do NOT think out loud or show your reasoning process.
-- Generate code immediately without excessive analysis.
-- Keep reasoning minimal - focus on producing working code.
-- Only include code comments if they clarify the code itself.
-- Output clean, runnable code that solves the task directly."""
-                                    },
-                                    {
-                                        "role": "user",
-                                        "content": f"Generate code for: {agent_task}"
-                                    }
-                                ]
-                                
-                                # Create a separate LLM client with medium reasoning_effort for code generation
-                                # Medium allows some reasoning but encourages direct output
-                                code_gen_config = LLMConfig()
-                                code_gen_config.reasoning_effort = "medium"
-                                code_gen_llm = LlamaCppClient(code_gen_config)
-                                
-                                # Stream code generation response
-                                code_response = ""
-                                reasoning_accumulated = ""
-                                chunk_count = 0
-                                enabled_tool_defs = get_enabled_tools(self.enabled_tools)
-                                # Stream tokens directly to code editor as they arrive
-                                await self.send_message("agent_code_chunk", {"content": "", "done": False})
-                                
-                                async for chunk in code_gen_llm.stream_complete(code_generation_messages, tools=None):  # No tools for code generation
-                                    chunk_count += 1
-                                    if chunk.startswith("data: "):
-                                        try:
-                                            data = json.loads(chunk[6:])
-                                            # Handle both content and reasoning_content
-                                            if "content" in data and data["content"]:
-                                                content = data["content"]
-                                                code_response += content
-                                                # Stream to code editor immediately
-                                                await self.send_message("agent_code_chunk", {"content": content, "done": False})
-                                            elif "reasoning_content" in data and data["reasoning_content"]:
-                                                reasoning_accumulated += data["reasoning_content"]
-                                        except json.JSONDecodeError:
-                                            pass
-                                    elif chunk.strip() and not chunk.startswith("data: "):
-                                        code_response += chunk
-                                        await self.send_message("agent_code_chunk", {"content": chunk, "done": False})
-                                
-                                print(f"[Voice Session] Code generation complete: {len(code_response)} chars")
-                                
-                                # If no content but we have reasoning, use reasoning as fallback
-                                if not code_response and reasoning_accumulated:
-                                    print(f"[Voice Session] No content received, using reasoning_content as fallback ({len(reasoning_accumulated)} chars)")
-                                    code_response = reasoning_accumulated
-                                
-                                if not code_response:
-                                    print(f"[Voice Session] WARNING: No code response received after {chunk_count} chunks!")
-                                    # The stream_complete should have yielded accumulated_content at the end
-                                    # If we got here, something went wrong - let's check what chunks we actually received
-                                    print(f"[Voice Session] Debug: chunk_count={chunk_count}, code_response empty, reasoning_accumulated={len(reasoning_accumulated)}")
-                                    # Don't return - let it fall through to show error in UI
-                                
-                                # Process code response
-                                if code_response and code_response.strip():
-                                    code_response = llm._extract_final_channel(code_response)
-                                    code_response = code_response.replace("<|channel|>analysis<|message|>", "")
-                                    code_response = code_response.replace("<|channel|>final<|message|>", "")
-                                    code_response = code_response.replace("<|end|>", "")
-                                    code_response = code_response.replace("<|start|>assistant", "")
-                                    # Remove markdown code blocks if present
-                                    code_response = code_response.replace("```python", "").replace("```", "").strip()
-                                    code_response = code_response.strip()
-                                    
-                                    if code_response:
-                                        print(f"[Voice Session] Code generated: {len(code_response)} characters")
-                                        
-                                        # Code was already streamed to editor in real-time above
-                                        # Execute code in sandbox if available
-                                        print(f"[Voice Session] SANDBOX_AVAILABLE: {SANDBOX_AVAILABLE}")
-                                        if SANDBOX_AVAILABLE:
-                                            print(f"[Voice Session] Starting code execution for task: {agent_task[:100]}...")
-                                            await self._execute_and_fix_code(code_response, agent_task)
-                                        else:
-                                            # If sandbox not available, just show code
-                                            print(f"[Voice Session] Sandbox not available - skipping execution")
-                                            await self.send_message("agent_code_chunk", {"content": "\n\n// Note: Code execution not available (llm-sandbox not installed). Install with: pip install 'llm-sandbox[docker]'", "done": True})
-                                        
-                                        # Add to conversation history with the actual code
-                                        code_summary = f"Generated code for: {agent_task}\n\n```python\n{code_response[:500]}{'...' if len(code_response) > 500 else ''}\n```"
-                                        self.conversation_history.append({"role": "assistant", "content": code_summary})
-                                        
-                                        # Send a message to frontend to add code to conversation UI
-                                        await self.send_message("agent_code_complete", {
-                                            "task": agent_task,
-                                            "code": code_response,
-                                            "has_execution": SANDBOX_AVAILABLE
-                                        })
-                                        return
-                                    else:
-                                        print(f"[Voice Session] Code response was empty after processing")
-                                else:
-                                    print(f"[Voice Session] No code response received")
-                            
-                            elif is_agent_tool and agent_type == "markdown_assistant":
+                            if is_agent_tool and agent_type == "markdown_assistant":
                                 # For markdown assistant, make a separate LLM call to generate markdown
                                 print(f"[Voice Session] Making separate LLM call for markdown generation (task: {agent_task[:100]}...)")
                                 
@@ -2124,6 +904,31 @@ CRITICAL INSTRUCTIONS:
                                 else:
                                     print(f"[Voice Session] No markdown response received")
                             
+                            elif is_agent_tool and agent_type == "reasoning_assistant":
+                                # For reasoning assistant, use Nemotron for deep analysis
+                                agent_problem = ""
+                                agent_context = ""
+                                agent_analysis_type = "general"
+                                
+                                # Extract problem, context, and analysis_type from tool result
+                                for tool_result in tool_results:
+                                    try:
+                                        result_data = json.loads(tool_result.get("content", "{}"))
+                                        if result_data.get("agent_type") == "reasoning_assistant":
+                                            agent_problem = result_data.get("problem", "")
+                                            agent_context = result_data.get("context", "")
+                                            agent_analysis_type = result_data.get("analysis_type", "general")
+                                            break
+                                    except json.JSONDecodeError:
+                                        pass
+                                
+                                if agent_problem:
+                                    print(f"[Voice Session] Executing reasoning agent for: {agent_problem[:100]}...")
+                                    await self.execute_reasoning_agent(agent_problem, agent_context, agent_analysis_type)
+                                    return
+                                else:
+                                    print(f"[Voice Session] No problem found for reasoning agent")
+                            
                             # Process and send the final response from tool execution (for non-agent tools or fallback)
                             if tool_final_response and tool_final_response.strip():
                                 tool_final_response = llm._extract_final_channel(tool_final_response)
@@ -2213,62 +1018,6 @@ CRITICAL INSTRUCTIONS:
             await self.send_final_response(final_response)
         else:
             print(f"[Voice Session] No final_response to send!")
-
-    async def execute_coding_agent(self, task: str, context: str = ""):
-        """Execute the coding assistant agent and stream results."""
-        try:
-            print(f"[Voice Session] Executing coding agent: {task[:50]}...")
-            
-            # Signal agent started
-            await self.send_message("agent_started", {"agent_type": "coding_assistant", "task": task})
-            
-            # Build messages for code generation
-            from prompts import CODING_ASSISTANT_PROMPT
-            
-            code_messages = [
-                {"role": "system", "content": CODING_ASSISTANT_PROMPT},
-                {"role": "user", "content": f"Task: {task}\n\nContext: {context}" if context else f"Task: {task}"}
-            ]
-            
-            # Create LLM client for agent
-            agent_llm = LlamaCppClient(LLMConfig())
-            code_response = ""
-            
-            # Send initial chunk to signal start
-            await self.send_message("agent_code_chunk", {"content": "", "done": False})
-            
-            async for chunk in agent_llm.stream_complete(code_messages, tools=None):
-                if chunk.startswith("data: "):
-                    try:
-                        data = json.loads(chunk[6:])
-                        if "content" in data and data["content"]:
-                            content = data["content"]
-                            code_response += content
-                            await self.send_message("agent_code_chunk", {"content": content, "done": False})
-                    except json.JSONDecodeError:
-                        pass
-                elif chunk.strip() and not chunk.startswith("data: "):
-                    code_response += chunk
-                    await self.send_message("agent_code_chunk", {"content": chunk, "done": False})
-            
-            # Clean up response
-            if code_response:
-                code_response = agent_llm._extract_final_channel(code_response)
-            
-            print(f"[Voice Session] Code generation complete: {len(code_response)} chars")
-            
-            # Signal completion
-            await self.send_message("agent_code_chunk", {"content": "", "done": True})
-            await self.send_message("agent_code_complete", {
-                "task": task,
-                "code": code_response
-            })
-            
-        except Exception as e:
-            print(f"[Voice Session] Coding agent error: {e}")
-            import traceback
-            traceback.print_exc()
-            await self.send_message("error", {"error": f"Coding agent error: {str(e)}"})
 
     async def execute_markdown_agent(self, task: str, context: str = ""):
         """Execute the markdown assistant agent and stream results."""
@@ -2391,6 +1140,146 @@ Output the complete HTML code."""
             traceback.print_exc()
             await self.send_message("error", {"error": f"HTML agent error: {str(e)}"})
 
+    def load_demo_files(self) -> str:
+        """Load demo files from demo_files/ folder for context injection."""
+        demo_dir = Path(__file__).parent / "demo_files"
+        if not demo_dir.exists():
+            return ""
+        
+        context_parts = []
+        context_parts.append("=== LOCAL DATA FILES ===\n")
+        
+        for file_path in sorted(demo_dir.iterdir()):
+            if file_path.is_file() and file_path.suffix in ['.csv', '.txt', '.md']:
+                try:
+                    content = file_path.read_text()
+                    context_parts.append(f"[{file_path.name}]")
+                    context_parts.append(content)
+                    context_parts.append("")  # Empty line between files
+                except Exception as e:
+                    print(f"[Demo Files] Error reading {file_path}: {e}")
+        
+        if len(context_parts) > 1:  # More than just the header
+            return "\n".join(context_parts)
+        return ""
+
+    async def execute_reasoning_agent(self, problem: str, context: str = "", analysis_type: str = "general"):
+        """Execute the Nemotron reasoning agent - shows thinking inline, then speaks conclusion."""
+        try:
+            print(f"[Voice Session] Executing reasoning agent: {problem[:80]}...")
+            print(f"[Voice Session] Analysis type: {analysis_type}")
+            
+            # Load demo files and inject into context
+            demo_context = self.load_demo_files()
+            if demo_context:
+                context = f"{context}\n\n{demo_context}" if context else demo_context
+                print(f"[Voice Session] Injected {len(demo_context)} chars of demo file context")
+            
+            # Signal reasoning started (for inline display)
+            await self.send_message("reasoning_started", {
+                "problem": problem,
+                "analysis_type": analysis_type
+            })
+            
+            # Create Nemotron client
+            nemotron = NemotronClient(NemotronConfig())
+            
+            thinking_response = ""
+            content_response = ""
+            chunk_count = 0
+            
+            # Stream the reasoning process
+            async for chunk in nemotron.stream_reasoning(problem, context, analysis_type):
+                chunk_count += 1
+                if chunk_count <= 5:
+                    print(f"[Voice Session] Reasoning chunk {chunk_count}: {chunk[:100]}...")
+                    
+                if chunk.startswith("data: "):
+                    try:
+                        data = json.loads(chunk[6:])
+                        
+                        if "thinking" in data:
+                            # Stream thinking to show inline
+                            thinking_chunk = data["thinking"]
+                            thinking_response += thinking_chunk
+                            await self.send_message("reasoning_thinking", {
+                                "content": thinking_chunk
+                            })
+                            
+                        elif "content" in data:
+                            # Stream conclusion content
+                            content_chunk = data["content"]
+                            content_response += content_chunk
+                            await self.send_message("reasoning_content", {
+                                "content": content_chunk
+                            })
+                            
+                        elif "done" in data:
+                            print(f"[Voice Session] Reasoning done signal received")
+                            break
+                            
+                        elif "error" in data:
+                            await self.send_message("error", {"error": data["error"]})
+                            return
+                            
+                    except json.JSONDecodeError:
+                        pass
+            
+            print(f"[Voice Session] Reasoning complete: {len(thinking_response)} thinking chars, {len(content_response)} content chars")
+            
+            # Signal completion with full content
+            await self.send_message("reasoning_complete", {
+                "problem": problem,
+                "thinking": thinking_response,
+                "conclusion": content_response
+            })
+            
+            # Add to conversation history
+            self.conversation_history.append({
+                "role": "assistant", 
+                "content": content_response if content_response else thinking_response
+            })
+            
+            # Speak the conclusion (it should already be TTS-friendly from the prompt)
+            if content_response:
+                await self.stream_tts(content_response)
+            elif thinking_response:
+                # If no separate conclusion, speak a summary of the thinking
+                summary = self._extract_spoken_summary(thinking_response)
+                if summary:
+                    await self.stream_tts(summary)
+            
+        except Exception as e:
+            print(f"[Voice Session] Reasoning agent error: {e}")
+            import traceback
+            traceback.print_exc()
+            await self.send_message("error", {"error": f"Reasoning agent error: {str(e)}"})
+    
+    def _extract_spoken_summary(self, text: str, max_sentences: int = 3) -> str:
+        """Extract a brief spoken summary from reasoning output."""
+        # Clean up markdown and formatting
+        import re
+        
+        # Remove headers, bullets, code blocks
+        text = re.sub(r'^#+\s+.*$', '', text, flags=re.MULTILINE)
+        text = re.sub(r'^[-*]\s+', '', text, flags=re.MULTILINE)
+        text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
+        text = re.sub(r'`[^`]+`', '', text)
+        
+        # Split into sentences
+        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        sentences = [s.strip() for s in sentences if s.strip() and len(s) > 10]
+        
+        # Take first few meaningful sentences
+        summary_sentences = sentences[:max_sentences]
+        summary = " ".join(summary_sentences)
+        
+        # Clean up any remaining formatting
+        summary = re.sub(r'\*+', '', summary)
+        summary = re.sub(r'\s+', ' ', summary).strip()
+        
+        return summary if len(summary) > 20 else ""
+
 
 MIN_AUDIO_SECONDS = 0.5
 
@@ -2406,12 +1295,19 @@ async def voice_call(websocket: WebSocket):
         await session.send_message("connected", {"status": "ready"})
         # Wait a moment for frontend to send initial voice selection
         await asyncio.sleep(0.2)
-        # Send greeting message (don't add to conversation history)
-        # Use session's selected_voice (which should be set by frontend or defaults to af_bella)
-        greeting = "Hey! I'm Spark. What can I help you with today?"
+        # Send a short greeting (don't add to conversation history)
+        # Pick a random short greeting for variety
+        import random
+        greetings = [
+            "Hey! What's up?",
+            "Hi there!",
+            "Hey, I'm Spark!",
+            "What can I help with?",
+            "Hi! Ready when you are.",
+        ]
+        greeting = random.choice(greetings)
         print(f"[Voice Call] Sending greeting with voice: {session.selected_voice}")
         await session.send_message("final_response", {"text": greeting})
-        # Explicitly use session's selected_voice to ensure consistency with regular responses
         await session.stream_tts(greeting, is_transient=False, voice=session.selected_voice)
     except Exception as e:
         print(f"[Voice Call] Error sending initial message: {e}")
@@ -2555,19 +1451,30 @@ async def voice_call(websocket: WebSocket):
                                 )
                                 audio_data = resampled.astype(np.float32)
                             
-                            # Transcribe audio
-                            asr = FasterWhisperASR(ASRConfig())
-                            transcription = await asr.transcribe(audio_data.astype(np.float32))
-                            print(f"[Voice Call] ASR result: '{transcription}'")
-                            
+                            # Transcribe audio with streaming (uses global asr instance)
+                            import time
+                            asr_start = time.perf_counter()
+                            transcription = ""
+
+                            # Stream ASR segments to UI as they're recognized
+                            async for partial_text in asr.transcribe_streaming(audio_data.astype(np.float32)):
+                                transcription = partial_text
+                                # Send partial result to frontend for live display
+                                await session.send_message("asr_partial", {"text": partial_text})
+                                print(f"[Voice Call] ASR partial: '{partial_text}'")
+
+                            asr_elapsed = (time.perf_counter() - asr_start) * 1000
+                            audio_duration = len(audio_data) / SAMPLE_RATE * 1000
+                            print(f"[Voice Call] ⏱️ ASR: {asr_elapsed:.0f}ms for {audio_duration:.0f}ms audio (RTF: {asr_elapsed/audio_duration:.2f}x) → '{transcription}'")
+
                             if not transcription or not transcription.strip():
                                 print("[Voice Call] Empty transcription, skipping")
                                 await session.send_message("asr_result", {"text": ""})
                                 continue
-                            
-                            # Send ASR result to frontend
+
+                            # Send final ASR result to frontend
                             await session.send_message("asr_result", {"text": transcription})
-                            
+
                             # Process with LLM and TTS
                             await session.process_user_message(transcription)
                             
@@ -2614,17 +1521,28 @@ async def voice_call(websocket: WebSocket):
                                 audio_data = resampled.astype(np.float32)
                                 print(f"[Video Call] Resampled to {SAMPLE_RATE}Hz: {len(audio_data)} samples")
                             
-                            # Transcribe audio
-                            asr = FasterWhisperASR(ASRConfig())
-                            transcription = await asr.transcribe(audio_data.astype(np.float32))
-                            print(f"[Video Call] ASR result: '{transcription}'")
-                            
+                            # Transcribe audio with streaming (uses global asr instance)
+                            import time
+                            asr_start = time.perf_counter()
+                            transcription = ""
+
+                            # Stream ASR segments to UI as they're recognized
+                            async for partial_text in asr.transcribe_streaming(audio_data.astype(np.float32)):
+                                transcription = partial_text
+                                # Send partial result to frontend for live display
+                                await session.send_message("asr_partial", {"text": partial_text})
+                                print(f"[Video Call] ASR partial: '{partial_text}'")
+
+                            asr_elapsed = (time.perf_counter() - asr_start) * 1000
+                            audio_duration = len(audio_data) / SAMPLE_RATE * 1000
+                            print(f"[Video Call] ⏱️ ASR: {asr_elapsed:.0f}ms for {audio_duration:.0f}ms audio (RTF: {asr_elapsed/audio_duration:.2f}x) → '{transcription}'")
+
                             if not transcription:
                                 print("[Video Call] Empty transcription, skipping")
                                 await session.send_message("asr_result", {"text": ""})
                                 continue
-                            
-                            # Send ASR result to frontend
+
+                            # Send final ASR result to frontend
                             await session.send_message("asr_result", {"text": transcription})
                             
                             # Add to conversation history
@@ -2636,57 +1554,133 @@ async def voice_call(websocket: WebSocket):
                             # Build VLM request with image if available
                             if image_b64:
                                 print(f"[Video Call] Image: {len(image_b64)} chars base64")
-                                
+
+                                # Face recognition - recognize people in frame
+                                face_context = ""
+                                try:
+                                    from clients.face import get_face_recognizer
+                                    face_recognizer = get_face_recognizer()
+
+                                    # Check for enrollment command: "remember my face as X" or "my name is X"
+                                    lower_text = transcription.lower()
+                                    if "remember my face as" in lower_text or "remember me as" in lower_text:
+                                        # Extract name from command
+                                        import re
+                                        match = re.search(r'(?:remember (?:my face|me) as|my name is)\s+(\w+)', lower_text)
+                                        if match:
+                                            enroll_name = match.group(1).title()
+                                            success = face_recognizer.enroll_face(enroll_name, image_b64)
+                                            if success:
+                                                await session.send_message("llm_final", {"text": f"Got it! I'll remember you as {enroll_name}."})
+                                                await session.stream_tts(f"Got it! I'll remember you as {enroll_name}.")
+                                                session.conversation_history.append({
+                                                    "role": "assistant",
+                                                    "content": f"Got it! I'll remember you as {enroll_name}."
+                                                })
+                                                continue  # Skip VLM call
+                                            else:
+                                                await session.stream_tts("I couldn't see your face clearly. Please try again.")
+                                                continue
+
+                                    # Recognize faces in frame
+                                    recognized = face_recognizer.recognize_faces(image_b64)
+                                    if recognized:
+                                        face_context = face_recognizer.format_scene_description(recognized)
+                                        print(f"[Video Call] Face recognition: {face_context}")
+                                except Exception as e:
+                                    print(f"[Video Call] Face recognition error (non-fatal): {e}")
+
                                 # Use VLM for response
                                 from prompts import VIDEO_CALL_PROMPT, DEFAULT_SYSTEM_PROMPT
-                                
+
                                 # Combine personal context with video call prompt
                                 system_prompt = custom_prompt or f"{DEFAULT_SYSTEM_PROMPT}\n\n{VIDEO_CALL_PROMPT}"
-                                
-                                vlm_messages = [
-                                    {"role": "system", "content": system_prompt},
-                                    {
-                                        "role": "user",
-                                        "content": [
-                                            {"type": "text", "text": transcription},
-                                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
-                                        ]
-                                    }
-                                ]
-                                
+
+                                # Add face context to system prompt if we recognized anyone
+                                if face_context:
+                                    system_prompt = f"{system_prompt}\n\nCURRENT SCENE: {face_context}"
+
+                                # Get recent conversation history (last 10 messages, excluding current)
+                                # This gives VLM context of recent conversation
+                                VLM_HISTORY_LIMIT = 10
+                                recent_history = session.conversation_history[-VLM_HISTORY_LIMIT-1:-1] if len(session.conversation_history) > 1 else []
+                                print(f"[Video Call] Including {len(recent_history)} history messages for VLM")
+
                                 # Get VLM response
+                                vlm_start = time.perf_counter()
                                 vlm = VLMClient(VLMConfig())
                                 enabled_tool_defs = get_enabled_tools(session.enabled_tools)
-                                vlm_result = await vlm.analyze_image(image_b64, transcription, system_prompt=system_prompt, tools=enabled_tool_defs if enabled_tool_defs else None)
-                                
-                                response_text = vlm_result.get("content", "")
-                                tool_calls = vlm_result.get("tool_calls", [])
-                                
-                                print(f"[Video Call] VLM response: {response_text[:100] if response_text else 'None'}...")
-                                
-                                # Handle tool calls
-                                if tool_calls:
-                                    print(f"[Video Call] Tool calls: {[tc.get('function', {}).get('name') for tc in tool_calls]}")
-                                    for tool_call in tool_calls:
-                                        func = tool_call.get("function", {})
-                                        tool_name = func.get("name")
-                                        try:
-                                            args = json.loads(func.get("arguments", "{}"))
-                                        except:
-                                            args = {}
-                                        
-                                        # Send acknowledgment
-                                        await session.stream_tts("On it.", is_transient=True)
-                                        
-                                        # Execute tool
-                                        if tool_name == "coding_assistant":
-                                            await session.execute_coding_agent(args.get("task", ""), args.get("context", ""))
-                                        elif tool_name == "markdown_assistant":
-                                            await session.execute_markdown_agent(args.get("task", ""), args.get("context", ""))
-                                        elif tool_name == "html_assistant":
-                                            await session.execute_html_agent(args.get("task", ""), args.get("context", ""))
+
+                                # Use streaming if no tools enabled, otherwise use non-streaming for tool support
+                                if enabled_tool_defs:
+                                    # Non-streaming mode with tool support
+                                    vlm_result = await vlm.analyze_image(
+                                        image_b64,
+                                        transcription,
+                                        system_prompt=system_prompt,
+                                        tools=enabled_tool_defs,
+                                        history=recent_history
+                                    )
+                                    vlm_elapsed = (time.perf_counter() - vlm_start) * 1000
+
+                                    response_text = vlm_result.get("content", "")
+                                    tool_calls = vlm_result.get("tool_calls", [])
+
+                                    print(f"[Video Call] ⏱️ VLM: {vlm_elapsed:.0f}ms → {len(response_text)} chars")
+
+                                    # Handle tool calls
+                                    if tool_calls:
+                                        print(f"[Video Call] Tool calls: {[tc.get('function', {}).get('name') for tc in tool_calls]}")
+                                        for tool_call in tool_calls:
+                                            func = tool_call.get("function", {})
+                                            tool_name = func.get("name")
+                                            try:
+                                                args = json.loads(func.get("arguments", "{}"))
+                                            except:
+                                                args = {}
+
+                                            print(f"[Video Call] Tool '{tool_name}' args: {args}")
+
+                                            # Send acknowledgment
+                                            await session.stream_tts("On it.", is_transient=True)
+
+                                            # Execute tool
+                                            if tool_name == "markdown_assistant":
+                                                await session.execute_markdown_agent(args.get("task", ""), args.get("context", ""))
+                                            elif tool_name == "html_assistant":
+                                                await session.execute_html_agent(args.get("task", ""), args.get("context", ""))
+                                            elif tool_name == "reasoning_assistant":
+                                                await session.execute_reasoning_agent(
+                                                    args.get("problem", ""),
+                                                    args.get("context", ""),
+                                                    args.get("analysis_type", "general")
+                                                )
+                                    else:
+                                        # Regular response - speak it
+                                        if response_text:
+                                            session.conversation_history.append({
+                                                "role": "assistant",
+                                                "content": response_text
+                                            })
+                                            await session.send_message("llm_final", {"text": response_text})
+                                            await session.stream_tts(response_text)
                                 else:
-                                    # Regular response - speak it
+                                    # Streaming mode (no tools) - stream text to UI as it arrives
+                                    print("[Video Call] Using streaming VLM (no tools)")
+                                    response_text = ""
+                                    async for chunk in vlm.stream_analyze_image(
+                                        image_b64,
+                                        transcription,
+                                        system_prompt=system_prompt,
+                                        history=recent_history
+                                    ):
+                                        response_text += chunk
+                                        # Send chunk to frontend for live display
+                                        await session.send_message("transient_response", {"text": response_text})
+
+                                    vlm_elapsed = (time.perf_counter() - vlm_start) * 1000
+                                    print(f"[Video Call] ⏱️ VLM Stream: {vlm_elapsed:.0f}ms → {len(response_text)} chars")
+
                                     if response_text:
                                         session.conversation_history.append({
                                             "role": "assistant",
