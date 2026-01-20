@@ -86,10 +86,11 @@ WORKDIR /app
 RUN pip3 install --break-system-packages --upgrade --ignore-installed pip setuptools wheel
 
 # Install PyTorch with CUDA 13.0 support
-# Use explicit +cu130 version to ensure we get the CUDA 13.0 wheel, not PyPI CPU version
+# Install torch first, then torchvision (--no-deps to avoid version conflict, torch already installed)
 RUN pip3 install --break-system-packages --no-cache-dir \
-    'torch==2.9.1+cu130' 'torchvision==0.25.0+cu130' \
-    --extra-index-url https://download.pytorch.org/whl/cu130
+    'torch==2.9.1+cu130' --extra-index-url https://download.pytorch.org/whl/cu130 && \
+    pip3 install --break-system-packages --no-cache-dir \
+    'torchvision==0.24.1+cu130' --no-deps --extra-index-url https://download.pytorch.org/whl/cu130
 
 # Install faster-whisper WITHOUT dependencies (use our built CTranslate2)
 # Then install its deps manually, excluding ctranslate2
