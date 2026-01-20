@@ -33,14 +33,14 @@ Download the models:
 
 ```bash
 # Qwen3-VL (Vision Language Model)
-curl -L -o Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf \
+wget -O Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf \
     https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct-GGUF/resolve/main/Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf
 
-curl -L -o mmproj-Qwen3VL-30B-A3B-Instruct-Q8_0.gguf \
+wget -O mmproj-Qwen3VL-30B-A3B-Instruct-Q8_0.gguf \
     https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct-GGUF/resolve/main/mmproj-Qwen3VL-30B-A3B-Instruct-Q8_0.gguf
 
 # Nemotron (Reasoning Model, optional)
-curl -L -o Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf \
+wget -O Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf \
     https://huggingface.co/unsloth/Nemotron-3-Nano-30B-A3B-GGUF/resolve/main/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf
 ```
 
