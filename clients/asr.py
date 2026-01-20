@@ -166,9 +166,21 @@ class LocalWhisperASR(BaseASR):
         
         # Run a dummy inference with 1 second of silence
         dummy_audio = np.zeros(SAMPLE_RATE, dtype=np.float32)
-        segments, _ = model.transcribe(dummy_audio, language="en")
-        # Consume the generator
-        list(segments)
+        try:
+            segments, _ = model.transcribe(dummy_audio, language="en")
+            # Consume the generator
+            list(segments)
+        except RuntimeError as e:
+            if "cuBLAS" in str(e) or "CUBLAS" in str(e):
+                print(f"[ASR] ⚠️ cuBLAS error with {self.cfg.compute_type}, falling back to float32...")
+                self._model = None
+                self.cfg.compute_type = "float32"
+                self.cfg.device = "cuda"  # Keep on GPU but use float32
+                model = self._get_model()
+                segments, _ = model.transcribe(dummy_audio, language="en")
+                list(segments)
+            else:
+                raise
         
         elapsed = (time.perf_counter() - start) * 1000
         print(f"[ASR] ✅ Warmup complete ({elapsed:.0f}ms)")
