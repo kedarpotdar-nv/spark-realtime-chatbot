@@ -1,4 +1,4 @@
-"""LLM client with streaming support for llama.cpp and TensorRT-LLM backends."""
+"""LLM client with streaming support for OpenAI-compatible backends (Ollama / llama.cpp / trtllm)."""
 
 import asyncio
 import json
@@ -8,7 +8,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import aiohttp
 
-from config import LLMConfig
+from config import LLMConfig, ReasoningConfig
 from .http_session import get_http_manager
 
 
@@ -19,7 +19,7 @@ class LlamaCppClient:
         if self.is_trtllm:
             print(f"[LLM] Using TensorRT-LLM backend (trtllm-serve)")
         else:
-            print(f"[LLM] Using standard OpenAI-compatible backend")
+            print(f"[LLM] Using {cfg.backend} backend: {cfg.model} @ {cfg.base_url}")
 
     def _extract_final_channel(self, content: str) -> str:
         """Extract final channel content from reasoning-style outputs."""
@@ -504,3 +504,111 @@ class LlamaCppClient:
             traceback.print_exc()
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
+
+class ReasoningClient:
+    """Deep-reasoning client — same Qwen3.6 model, reasoning_effort=high.
+
+    Emits Nemotron-compatible SSE chunks so the existing UI wiring keeps working:
+      data: {"thinking": "..."}   ← reasoning trace
+      data: {"content":  "..."}   ← final conclusion
+      data: {"done": true}
+    """
+
+    def __init__(self, cfg: Optional[ReasoningConfig] = None):
+        self.cfg = cfg or ReasoningConfig()
+        print(f"[Reasoning] Using {self.cfg.model} @ {self.cfg.base_url} (effort={self.cfg.reasoning_effort})")
+
+    async def stream_reasoning(
+        self,
+        problem: str,
+        context: str = "",
+        analysis_type: str = "general",
+        system_prompt: Optional[str] = None,
+    ) -> AsyncGenerator[str, None]:
+        from prompts import (
+            NEMOTRON_REASONING_PROMPT,
+            NEMOTRON_ANALYSIS_PROMPT,
+            NEMOTRON_PLANNING_PROMPT,
+            NEMOTRON_PRIORITIZATION_PROMPT,
+        )
+
+        if system_prompt is None:
+            if analysis_type == "planning":
+                system_prompt = NEMOTRON_PLANNING_PROMPT
+            elif analysis_type == "prioritization":
+                system_prompt = NEMOTRON_PRIORITIZATION_PROMPT
+            elif analysis_type in ("comparison", "risk_assessment", "architecture_review"):
+                system_prompt = NEMOTRON_ANALYSIS_PROMPT
+            else:
+                system_prompt = NEMOTRON_REASONING_PROMPT
+
+        user_content = f"Problem: {problem}"
+        if context:
+            user_content += f"\n\nContext:\n{context}"
+        if analysis_type and analysis_type != "general":
+            user_content += f"\n\nAnalysis Type: {analysis_type}"
+
+        payload = {
+            "model": self.cfg.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            "temperature": self.cfg.temperature,
+            "max_tokens": self.cfg.max_tokens,
+            "stream": True,
+            "reasoning_effort": self.cfg.reasoning_effort,
+        }
+
+        thinking_buf = ""
+        content_buf = ""
+
+        try:
+            http_manager = get_http_manager()
+            session = await http_manager.get_session()
+            async with session.post(
+                self.cfg.base_url,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=300),
+            ) as resp:
+                if resp.status != 200:
+                    err = (await resp.text())[:200]
+                    print(f"[Reasoning] Error {resp.status}: {err}")
+                    yield f'data: {{"error": "Reasoning server error {resp.status}"}}\n\n'
+                    return
+
+                async for raw in resp.content:
+                    line = raw.decode("utf-8", errors="ignore").strip()
+                    if not line or not line.startswith("data: "):
+                        continue
+                    if line == "data: [DONE]":
+                        break
+                    try:
+                        data = json.loads(line[6:])
+                    except json.JSONDecodeError:
+                        continue
+                    choices = data.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    # Qwen3.6 via Ollama → "reasoning"; vLLM/other → "reasoning_content"
+                    r = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                    c = delta.get("content") or ""
+                    if r:
+                        thinking_buf += r
+                        if len(thinking_buf) > 80 or "\n" in thinking_buf:
+                            yield f'data: {json.dumps({"thinking": thinking_buf})}\n\n'
+                            thinking_buf = ""
+                    if c:
+                        content_buf += c
+                        yield f'data: {json.dumps({"content": c})}\n\n'
+
+                if thinking_buf:
+                    yield f'data: {json.dumps({"thinking": thinking_buf})}\n\n'
+                yield 'data: {"done": true}\n\n'
+
+        except asyncio.TimeoutError:
+            yield 'data: {"error": "Reasoning timed out"}\n\n'
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            yield f'data: {json.dumps({"error": str(e)})}\n\n'

@@ -1,0 +1,80 @@
+{
+  "timestamp": "2026-04-17T08:18:29",
+  "git_sha": "2c7c61f",
+  "git_dirty": true,
+  "model": "qwen3.6:35b-a3b",
+  "ollama_url": "http://localhost:11434/v1/chat/completions",
+  "trials": 5,
+  "voice_turn": {
+    "ttft_ms": {
+      "n": 5,
+      "median": 245.2,
+      "p90": 284.2,
+      "min": 218.3,
+      "max": 277.7
+    },
+    "total_ms": {
+      "n": 5,
+      "median": 372.3,
+      "p90": 417.9,
+      "min": 344.4,
+      "max": 408.9
+    }
+  },
+  "video_turn": {
+    "ttft_ms": {
+      "n": 5,
+      "median": 878.8,
+      "p90": 938.1,
+      "min": 854.1,
+      "max": 928.3
+    },
+    "total_ms": {
+      "n": 5,
+      "median": 1372.0,
+      "p90": 2519.8,
+      "min": 1206.5,
+      "max": 2241.1
+    }
+  },
+  "reasoning_turn": {
+    "total_ms": {
+      "n": 2,
+      "median": 23257.5,
+      "p90": 31254.1,
+      "min": 15260.8,
+      "max": 31254.1
+    },
+    "reasoning_chars": {
+      "n": 2,
+      "median": 4916.5,
+      "p90": 6621,
+      "min": 3212,
+      "max": 6621
+    },
+    "content_chars": {
+      "n": 2,
+      "median": 189.0,
+      "p90": 223,
+      "min": 155,
+      "max": 223
+    }
+  },
+  "tool_call_turn": {
+    "ttft_ms": {
+      "n": 5,
+      "median": 867.2,
+      "p90": 895.5,
+      "min": 829.5,
+      "max": 887.6
+    },
+    "total_ms": {
+      "n": 5,
+      "median": 867.3,
+      "p90": 895.6,
+      "min": 829.5,
+      "max": 887.7
+    },
+    "tool_call_rate": 1.0
+  }
+}

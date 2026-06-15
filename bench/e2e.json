@@ -1,0 +1,21 @@
+{
+  "date": "2026-04-17",
+  "path": "WebSocket text_message → Qwen3.6-35B-A3B (Ollama) → Kokoro TTS (CPU) → audio out",
+  "env": {
+    "container": "realtime2-tts:latest",
+    "host_ollama": "http://localhost:11434",
+    "tts_engine": "kokoro",
+    "tts_device": "cpu",
+    "llm_reasoning_effort": "none"
+  },
+  "trials": [
+    {"prompt": "What is 2+2 in one word?", "total_ms": 1112, "first_msg_ms": 104, "final_text": "Four"},
+    {"prompt": "What is 2+2 in one word?", "total_ms": 1125, "first_msg_ms": 124, "final_text": "Four"}
+  ],
+  "notes": [
+    "Full stack: text received → process_user_message → llm.stream_complete → send_final_response → stream_tts.",
+    "Cold first turn ~1.7s (Kokoro/ffmpeg/spacy download on first call); warm turns ~1.1s.",
+    "Ollama bench alone (voice_turn): 365ms total. Delta of ~750ms is TTS + server plumbing.",
+    "Bench client: bench/test_ws_text.py"
+  ]
+}

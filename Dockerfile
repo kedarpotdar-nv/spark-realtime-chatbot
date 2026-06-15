@@ -1,11 +1,15 @@
 # =============================================================================
 # spark-realtime-chatbot Dockerfile for DGX Spark (CUDA 13.0 / GB10)
 # =============================================================================
-# This Dockerfile builds CTranslate2 from source with CUDA support for the
-# GB10 architecture (sm_121) and installs all dependencies.
+# LLM + VLM + reasoning all served by Ollama (Qwen3.6-35B-A3B) on the host at
+# :11434. This container only runs the FastAPI orchestrator, ASR (faster-whisper
+# via CTranslate2 built from source for GB10 sm_121), TTS (Kokoro), and face
+# recognition (DeepFace).
 #
-# Build: docker build -t spark-realtime-chatbot .
-# Run:   docker run --gpus all -p 8443:8443 spark-realtime-chatbot
+# Build:  docker build -t spark-realtime-chatbot .
+# Run:    docker run --gpus all --net host -it --init \
+#             -v ~/.cache/huggingface:/root/.cache/huggingface \
+#             spark-realtime-chatbot
 # =============================================================================
 
 FROM nvcr.io/nvidia/cuda:13.0.0-devel-ubuntu24.04
@@ -195,19 +199,24 @@ ENV PORT=8443 \
     ASR_MODEL=Systran/faster-distil-whisper-large-v3 \
     ASR_DEVICE=cuda \
     ASR_COMPUTE_TYPE=float16 \
-    # TTS Configuration
+    # TTS Configuration — Kokoro on CUDA works on GB10 with torch cu130 wheels
+    TTS_ENGINE=kokoro \
     TTS_DEVICE=cuda \
     KOKORO_LANG=a \
     KOKORO_VOICE=af_bella \
     KOKORO_SPEED=1.2 \
     TTS_OVERLAP=true \
-    # LLM Configuration (expects external llama-server)
-    LLM_SERVER_URL=http://localhost:8080/v1/chat/completions \
-    LLM_MODEL=qwen3-vl \
+    # LLM / VLM / reasoning all point at host Ollama (use --net host)
+    LLM_SERVER_URL=http://localhost:11434/v1/chat/completions \
+    LLM_MODEL=qwen3.6:35b-a3b \
     LLM_MAX_TOKENS=4096 \
-    # Nemotron Configuration (expects external llama-server)
-    NEMOTRON_SERVER_URL=http://localhost:8005/v1/chat/completions \
-    NEMOTRON_MODEL=nemotron-3-nano \
+    LLM_REASONING_EFFORT=none \
+    VLM_SERVER_URL=http://localhost:11434/v1/chat/completions \
+    VLM_MODEL=qwen3.6:35b-a3b \
+    VLM_REASONING_EFFORT=none \
+    REASONING_SERVER_URL=http://localhost:11434/v1/chat/completions \
+    REASONING_MODEL=qwen3.6:35b-a3b \
+    REASONING_EFFORT=high \
     # HuggingFace cache
     HF_HOME=/root/.cache/huggingface
 

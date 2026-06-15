@@ -1,18 +1,30 @@
 fastapi
 uvicorn[standard]
 websockets
-kokoro-tts
+aiohttp
+python-multipart
+httpx
+
+# ASR
+faster-whisper
+
+# TTS
 kokoro
+kokoro-tts
 soundfile
 numpy
 torch
-aiohttp
-python-multipart
-llm-sandbox[docker]
+
 # Face recognition
 deepface
 opencv-python
 
-# Additional backend dependencies (may be needed even with docker backend)
+# Agent tools
+llm-sandbox[docker]
+mcp
+requests
+beautifulsoup4
+
+# Optional backends for llm-sandbox
 podman
 kubernetes

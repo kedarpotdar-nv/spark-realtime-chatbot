@@ -1,9 +1,23 @@
-"""Text-to-Speech client using Kokoro TTS."""
+"""Text-to-Speech clients.
+
+Two interchangeable backends with the same surface:
+  - KokoroTTS       : default, CPU-friendly, sub-500ms TTFT on short utterances
+  - ChatterboxTTS   : experimental, better voice quality, CUDA-only,
+                       slower first-chunk (see bench/tts.json)
+
+Both implement:
+    synth_to_file(text, out_path)
+    async synth_stream(text)         -> async generator of WAV bytes
+    synth_stream_chunks(text, voice) -> sync generator of (pcm16, sr) tuples
+
+Factory: create_tts(cfg) picks the right one based on cfg.engine.
+"""
 
 import io
 import re
+import time
 from pathlib import Path
-from typing import AsyncGenerator, Generator, Tuple
+from typing import AsyncGenerator, Generator, Optional, Tuple
 
 import numpy as np
 import torch
@@ -180,4 +194,92 @@ class KokoroTTS:
 
                 # Yield audio data with sample rate immediately
                 yield (audio_bytes, sr)
+
+
+class ChatterboxTTS:
+    """Experimental Chatterbox-Turbo backend. Better voice quality than Kokoro,
+    but slower per-utterance on GB10 and no native streaming (generate() is
+    one-shot). We wrap .generate() and fake-stream by splitting on sentence
+    boundaries ourselves, same as the Kokoro streaming path.
+    """
+
+    def __init__(self, cfg: TTSConfig):
+        print(f"[TTS] Loading Chatterbox-Turbo (device={cfg.device})...")
+        self.cfg = cfg
+        try:
+            from chatterbox.tts import ChatterboxTTS as _Cb
+        except ImportError as e:
+            raise RuntimeError(
+                "chatterbox-tts not installed. Install with `pip install chatterbox-tts` "
+                "in an environment with a matching torch+torchaudio."
+            ) from e
+        device = cfg.device if torch.cuda.is_available() and cfg.device == "cuda" else "cpu"
+        self._model = _Cb.from_pretrained(device=device)
+        self.sample_rate = int(getattr(self._model, "sr", 24000))
+        self._exag = cfg.chatterbox_exaggeration
+        self._cfgw = cfg.chatterbox_cfg_weight
+        self._device = device
+        print(f"[TTS] Chatterbox loaded on {device}, sr={self.sample_rate}")
+
+    def _generate(self, text: str) -> np.ndarray:
+        wav = self._model.generate(text, exaggeration=self._exag, cfg_weight=self._cfgw)
+        if hasattr(wav, "detach"):
+            wav = wav.detach().cpu().numpy()
+        if wav.ndim == 2:
+            wav = wav[0] if wav.shape[0] == 1 else wav.mean(axis=0)
+        return wav.astype(np.float32)
+
+    def synth_to_file(self, text: str, out_path: Path) -> None:
+        if not text.strip():
+            sf.write(str(out_path), np.zeros(1600, dtype=np.float32), self.sample_rate)
+            return
+        wav = self._generate(text)
+        sf.write(str(out_path), wav, self.sample_rate, subtype="PCM_16")
+
+    async def synth_stream(self, text: str) -> AsyncGenerator[bytes, None]:
+        if not text.strip():
+            yield b""
+            return
+        wav = self._generate(text)
+        buf = io.BytesIO()
+        sf.write(buf, wav, self.sample_rate, subtype="PCM_16", format="WAV")
+        data = buf.getvalue()
+        for i in range(0, len(data), 8192):
+            yield data[i:i + 8192]
+
+    def synth_stream_chunks(self, text: str, voice: Optional[str] = None):
+        """Split on sentence boundaries and generate each separately for pseudo-streaming."""
+        if not text.strip():
+            return
+        sentences = re.split(r'([.!?]\s+)', text)
+        chunks = []
+        for i in range(0, len(sentences) - 1, 2):
+            chunks.append(sentences[i] + (sentences[i + 1] if i + 1 < len(sentences) else ""))
+        if len(sentences) % 2 == 1 and sentences[-1].strip():
+            chunks.append(sentences[-1])
+        if not chunks:
+            chunks = [text]
+        print(f"[TTS/chatterbox] {len(chunks)} chunk(s)")
+        sr = self.sample_rate
+        for idx, chunk_text in enumerate(chunks):
+            if not chunk_text.strip():
+                continue
+            t0 = time.perf_counter()
+            wav = self._generate(chunk_text.strip())
+            synth_ms = (time.perf_counter() - t0) * 1000
+            pcm16 = (np.clip(wav, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
+            audio_ms = (len(wav) / sr) * 1000
+            rtf = synth_ms / audio_ms if audio_ms else 0
+            print(f"[TTS/chatterbox] chunk {idx+1}: {synth_ms:.0f}ms → {audio_ms:.0f}ms (RTF {rtf:.2f})")
+            yield (pcm16, sr)
+
+
+def create_tts(cfg: TTSConfig):
+    """Factory: pick the TTS backend based on cfg.engine."""
+    engine = (cfg.engine or "kokoro").lower()
+    if engine == "chatterbox":
+        return ChatterboxTTS(cfg)
+    if engine != "kokoro":
+        print(f"[TTS] unknown engine {engine!r}, falling back to kokoro")
+    return KokoroTTS(cfg)
 

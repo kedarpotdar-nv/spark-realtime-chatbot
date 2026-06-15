@@ -1978,23 +1978,16 @@ function connectVoiceWebSocket() {
         const initialVoice = voiceSelect.value;
         voiceWs.send(JSON.stringify({ type: "set_voice", voice: initialVoice }));
         
-        // Send initial tool state (capabilities + agents)
+        // Send initial tool state (capabilities + inline tools + agents)
         const capabilityCheckboxes = document.querySelectorAll('input[id^="cap"]');
+        const toolCheckboxes = document.querySelectorAll('input[id^="tool"]');
         const agentCheckboxes = document.querySelectorAll('input[id^="agent"]');
         const enabledTools = [];
-        
-        capabilityCheckboxes.forEach(cb => {
-          if (cb.checked) {
-            enabledTools.push(cb.value);
-          }
-        });
-        
-        agentCheckboxes.forEach(cb => {
-          if (cb.checked) {
-            enabledTools.push(cb.value);
-          }
-        });
-        
+
+        capabilityCheckboxes.forEach(cb => { if (cb.checked) enabledTools.push(cb.value); });
+        toolCheckboxes.forEach(cb => { if (cb.checked) enabledTools.push(cb.value); });
+        agentCheckboxes.forEach(cb => { if (cb.checked) enabledTools.push(cb.value); });
+
         voiceWs.send(JSON.stringify({ type: "set_tools", tools: enabledTools }));
         
       }
@@ -2186,7 +2179,7 @@ function createReasoningMessage(problem) {
   // Header
   const header = document.createElement("div");
   header.style.cssText = "display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; padding-bottom: 0.5rem; border-bottom: 1px solid rgba(118, 185, 0, 0.3);";
-  header.innerHTML = `<span style="font-size: 1.2rem;">🧠</span><span style="color: #76b900; font-weight: 600;">Nemotron Reasoning</span><span id="reasoningSpinner" style="margin-left: auto; width: 12px; height: 12px; border: 2px solid #76b900; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite;"></span>`;
+  header.innerHTML = `<span style="font-size: 1.2rem;">🧠</span><span style="color: #76b900; font-weight: 600;">Qwen3.6 Reasoning</span><span id="reasoningSpinner" style="margin-left: auto; width: 12px; height: 12px; border: 2px solid #76b900; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite;"></span>`;
   container.appendChild(header);
   
   // Thinking section (collapsible)
@@ -2329,7 +2322,7 @@ function openReasoningModal(task, analysisType) {
   // Reset status
   const statusEl = document.getElementById("reasoningStatus");
   if (statusEl) {
-    statusEl.innerHTML = `<span style="width: 8px; height: 8px; background: #76b900; border-radius: 50%; animation: pulse 1s infinite;"></span><span style="color: #666;">Nemotron is thinking...</span>`;
+    statusEl.innerHTML = `<span style="width: 8px; height: 8px; background: #76b900; border-radius: 50%; animation: pulse 1s infinite;"></span><span style="color: #666;">Qwen3.6 is thinking...</span>`;
   }
   
   // Show thinking indicator
@@ -3272,21 +3265,14 @@ voiceSelect.onchange = (e) => {
 // Tool capability checkboxes handler
 function updateEnabledTools() {
   const capabilityCheckboxes = document.querySelectorAll('input[id^="cap"]');
+  const toolCheckboxes = document.querySelectorAll('input[id^="tool"]');
   const agentCheckboxes = document.querySelectorAll('input[id^="agent"]');
   const enabledTools = [];
-  
-  capabilityCheckboxes.forEach(cb => {
-    if (cb.checked) {
-      enabledTools.push(cb.value);
-    }
-  });
-  
-  agentCheckboxes.forEach(cb => {
-    if (cb.checked) {
-      enabledTools.push(cb.value);
-    }
-  });
-  
+
+  capabilityCheckboxes.forEach(cb => { if (cb.checked) enabledTools.push(cb.value); });
+  toolCheckboxes.forEach(cb => { if (cb.checked) enabledTools.push(cb.value); });
+  agentCheckboxes.forEach(cb => { if (cb.checked) enabledTools.push(cb.value); });
+
   if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
     voiceWs.send(JSON.stringify({ type: "set_tools", tools: enabledTools }));
     log(`Tools updated: ${enabledTools.join(", ")}`);
@@ -3295,18 +3281,10 @@ function updateEnabledTools() {
   }
 }
 
-// Attach change handlers to all capability and agent checkboxes
+// Attach change handlers to all capability, tool, and agent checkboxes
 document.addEventListener("DOMContentLoaded", () => {
-  const capabilityCheckboxes = document.querySelectorAll('input[id^="cap"]');
-  const agentCheckboxes = document.querySelectorAll('input[id^="agent"]');
-  
-  capabilityCheckboxes.forEach(cb => {
-    cb.addEventListener("change", updateEnabledTools);
-  });
-  
-  agentCheckboxes.forEach(cb => {
-    cb.addEventListener("change", updateEnabledTools);
-  });
+  const allCheckboxes = document.querySelectorAll('input[id^="cap"], input[id^="tool"], input[id^="agent"]');
+  allCheckboxes.forEach(cb => cb.addEventListener("change", updateEnabledTools));
 });
 
 

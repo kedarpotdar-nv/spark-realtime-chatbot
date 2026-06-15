@@ -1,0 +1,31 @@
+{
+  "timestamp": "2026-04-17T08:23:14",
+  "git_sha": "1b77e0c",
+  "git_dirty": true,
+  "model": "qwen3.6:35b-a3b",
+  "ollama_url": "http://localhost:11434/v1/chat/completions",
+  "trials": 5,
+  "agent_loop_turn": {
+    "ttft_ms": {
+      "n": 5,
+      "median": 1552.9,
+      "p90": 1623.3,
+      "min": 1492.6,
+      "max": 1616.8
+    },
+    "total_ms": {
+      "n": 5,
+      "median": 1858.5,
+      "p90": 1922.9,
+      "min": 1688.0,
+      "max": 1905.8
+    },
+    "iterations": {
+      "n": 5,
+      "median": 2,
+      "p90": 2.0,
+      "min": 2,
+      "max": 2
+    }
+  }
+}

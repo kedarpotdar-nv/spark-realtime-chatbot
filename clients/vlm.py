@@ -66,7 +66,9 @@ class VLMClient:
             "max_tokens": self.cfg.max_tokens,
             "stream": False
         }
-        
+        if getattr(self.cfg, "reasoning_effort", None):
+            payload["reasoning_effort"] = self.cfg.reasoning_effort
+
         # Add tools if provided
         if tools:
             payload["tools"] = tools
@@ -174,6 +176,8 @@ class VLMClient:
             "max_tokens": self.cfg.max_tokens,
             "stream": True
         }
+        if getattr(self.cfg, "reasoning_effort", None):
+            payload["reasoning_effort"] = self.cfg.reasoning_effort
 
         request_start = time.perf_counter()
         ttft_recorded = False

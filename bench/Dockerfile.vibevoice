@@ -1,0 +1,32 @@
+# VibeVoice-Realtime-0.5B dedicated image.
+# Uses NGC torch 2.10 (ships with sm_121) — we don't override it because
+# VibeVoice doesn't pin torch. Only transformers is pinned (4.51.3).
+
+FROM nvcr.io/nvidia/pytorch:25.11-py3
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    VV_VENV=/opt/vv_venv \
+    PATH=/opt/vv_venv/bin:$PATH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg libsndfile1 espeak-ng git && rm -rf /var/lib/apt/lists/*
+
+# Fresh venv so we don't fight NGC's site-packages torch
+RUN python3 -m venv /opt/vv_venv && /opt/vv_venv/bin/pip install --upgrade pip
+
+# cu130 wheels — Blackwell sm_121 works here (proven in bench/tts.json)
+RUN pip install --index-url https://download.pytorch.org/whl/cu130 \
+    torch torchaudio torchvision
+
+# VibeVoice source install (no pypi package). Install its non-torch deps
+# without pulling in its pinned torch.
+RUN git clone --depth 1 https://github.com/microsoft/VibeVoice.git /opt/VibeVoice && \
+    pip install --no-deps -e /opt/VibeVoice && \
+    pip install 'transformers==4.51.3' 'huggingface_hub>=0.24,<1' 'tokenizers>=0.20,<1' \
+        accelerate safetensors numpy scipy librosa ml-collections absl-py av aiortc \
+        fastapi 'uvicorn[standard]' pydub requests soundfile einops omegaconf diffusers
+
+WORKDIR /workspace/realtime2
+CMD ["bash"]

@@ -1,0 +1,40 @@
+# TTS benchmarking image — matching torch+torchaudio from pypi (GB10 works).
+# Houses Kokoro (current) and Chatterbox-Turbo (candidate) side-by-side so we
+# can bench them against each other in the same runtime.
+FROM nvcr.io/nvidia/pytorch:25.11-py3
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    TTS_VENV=/opt/tts_venv \
+    PATH=/opt/tts_venv/bin:$PATH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg libsndfile1 espeak-ng && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/tts_venv && \
+    /opt/tts_venv/bin/pip install --upgrade pip
+
+# cu130 wheels have sm_121 kernels (main branch's proven config).
+# cu128 wheels do NOT — they trip nvrtc on Blackwell JIT paths.
+RUN pip install --index-url https://download.pytorch.org/whl/cu130 \
+    torch torchaudio torchvision
+
+# Kokoro (current default) — simple install
+RUN pip install kokoro kokoro-tts soundfile scipy \
+    phonemizer-fork misaki loguru
+
+# Chatterbox-Turbo (candidate) — no-deps to preserve our torch, then add the rest
+RUN pip install --no-deps chatterbox-tts conformer s3tokenizer resemble-perth \
+    diffusers omegaconf pyloudnorm safetensors einops \
+    'antlr4-python3-runtime==4.9.3' && \
+    pip install 'transformers>=4.46,<5' 'huggingface_hub>=0.24,<1' \
+        'tokenizers>=0.20,<1' numpy importlib-metadata onnx onnxruntime \
+        accelerate regex
+
+# realtime2 server runtime deps
+RUN pip install aiohttp fastapi 'uvicorn[standard]' websockets python-multipart \
+    httpx opencv-python-headless faster-whisper ctranslate2
+
+WORKDIR /workspace/realtime2
+CMD ["bash"]

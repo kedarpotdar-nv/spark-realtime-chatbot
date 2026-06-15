@@ -23,7 +23,7 @@ from starlette.websockets import WebSocketState
 
 # Local modules
 from config import (
-    ASRConfig, LLMConfig, VLMConfig, NemotronConfig, TTSConfig,
+    ASRConfig, LLMConfig, VLMConfig, ReasoningConfig, TTSConfig,
     AUDIO_DIR, STATIC_DIR, SAMPLE_RATE, WORKSPACE_ROOT, FFMPEG_PATH
 )
 from audio import check_ffmpeg_available, decode_webm_bytes_to_pcm_f32
@@ -33,8 +33,8 @@ from clients import (
     create_asr,
     LlamaCppClient,
     VLMClient,
-    NemotronClient,
-    KokoroTTS,
+    ReasoningClient,
+    create_tts,
 )
 from clients.http_session import set_http_manager
 
@@ -49,7 +49,7 @@ from prompts import DEFAULT_SYSTEM_PROMPT
 # Global models (initialized at startup)
 asr = None  # FasterWhisperASR or LocalWhisperASR based on ASR_MODE
 llm: LlamaCppClient = None
-tts: KokoroTTS = None
+tts = None  # KokoroTTS or ChatterboxTTS, selected via TTSConfig.engine
 
 # Conversation history (in-memory, per-session could be added later)
 conversation_history: List[Dict[str, str]] = [
@@ -87,7 +87,7 @@ async def lifespan(app: FastAPI):
     if hasattr(asr, 'warmup'):
         asr.warmup()
     llm = LlamaCppClient(LLMConfig())
-    tts = KokoroTTS(TTSConfig())
+    tts = create_tts(TTSConfig())
     yield
     # Cleanup: close shared HTTP session
     if http_manager:
@@ -645,6 +645,34 @@ class VoiceSession:
             await tts_task
             raise
 
+    # Multi-turn tool-call loop cap. Each iteration = one LLM stream that may
+    # end with another round of tool calls. Inline tools feed results back
+    # into the model; agent tools short-circuit to their UI handlers.
+    MAX_TOOL_ITERATIONS = 4
+
+    async def _execute_tool_calls_parallel(self, tool_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Execute tool calls concurrently. Returns OpenAI-format tool_result messages."""
+        async def _run(tc):
+            tool_id = tc.get("id", "")
+            fn = tc.get("function", {}) or {}
+            name = fn.get("name", "")
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            print(f"[Voice Session]   → parallel tool: {name}({list(args.keys())})")
+            t0 = asyncio.get_event_loop().time()
+            content = await execute_tool(name, args)
+            elapsed_ms = (asyncio.get_event_loop().time() - t0) * 1000
+            print(f"[Voice Session]   ← {name} in {elapsed_ms:.0f}ms ({len(content)} chars)")
+            return {
+                "tool_call_id": tool_id,
+                "role": "tool",
+                "name": name,
+                "content": content,
+            }
+        return await asyncio.gather(*[_run(tc) for tc in tool_calls])
+
     async def process_user_message(self, user_text: str):
         """Process user message through LLM pipeline."""
         if not user_text or not user_text.strip():
@@ -739,70 +767,88 @@ class VoiceSession:
                             self.conversation_history.append(assistant_message)
                             print(f"[Voice Session] Added assistant message with {len(tool_calls)} tool call(s) to history")
                             
-                            # Execute each tool call
-                            tool_results = []
-                            for tool_call in tool_calls:
-                                tool_id = tool_call.get("id", "")
-                                function = tool_call.get("function", {})
-                                tool_name = function.get("name", "")
-                                arguments_str = function.get("arguments", "{}")
-                                
+                            # Execute all tool calls in parallel
+                            tool_results = await self._execute_tool_calls_parallel(tool_calls)
+
+                            # Emit UI signals for any agent-type tools
+                            for tr in tool_results:
                                 try:
-                                    arguments = json.loads(arguments_str)
-                                except json.JSONDecodeError:
-                                    arguments = {}
-                                
-                                print(f"[Voice Session] Executing tool: {tool_name} with args: {arguments}")
-                                
-                                # Execute tool
-                                tool_result = await execute_tool(tool_name, arguments)
-                                print(f"[Voice Session] Tool '{tool_name}' returned: {tool_result[:100]}...")
-                                
-                                # Check if this is an agent tool that needs special handling
-                                try:
-                                    tool_result_data = json.loads(tool_result)
-                                    if tool_result_data.get("agent_type"):
-                                        # This is an agent tool - send signal to open UI
+                                    d = json.loads(tr.get("content", "{}"))
+                                    if d.get("agent_type"):
                                         await self.send_message("agent_started", {
-                                            "agent_type": tool_result_data.get("agent_type"),
-                                            "task": tool_result_data.get("task", ""),
-                                            "codebase_path": tool_result_data.get("codebase_path", "")
+                                            "agent_type": d.get("agent_type"),
+                                            "task": d.get("task", ""),
+                                            "codebase_path": d.get("codebase_path", "")
                                         })
-                                        print(f"[Voice Session] Agent '{tool_result_data.get('agent_type')}' started - UI should open")
+                                        print(f"[Voice Session] Agent '{d.get('agent_type')}' started - UI should open")
                                 except json.JSONDecodeError:
-                                    pass  # Not JSON, treat as regular tool result
-                                
-                                tool_results.append({
-                                    "tool_call_id": tool_id,
-                                    "role": "tool",
-                                    "name": tool_name,
-                                    "content": tool_result
-                                })
-                            
-                            # Add tool results to conversation history (after assistant message with tool_calls)
+                                    pass
+
+                            # Append to conversation history (after assistant message with tool_calls)
                             for tool_result in tool_results:
                                 self.conversation_history.append(tool_result)
                             print(f"[Voice Session] Added {len(tool_results)} tool result(s) to history")
-                            
-                            # Get final response from LLM with tool results
-                            print(f"[Voice Session] Getting final response after tool execution")
-                            followup_messages = list(self.conversation_history)
-                            
-                            # Stream final response
+
+                            # Multi-iteration agent loop: re-stream the model, execute any new tool
+                            # calls in parallel, repeat until we get a plain-content response or
+                            # hit MAX_TOOL_ITERATIONS. Content streams to TTS sentence-by-sentence
+                            # as it arrives — no accumulate-then-speak delay.
                             tool_final_response = ""
+                            sentence_buf = ""
+                            spoke_anything = False
                             enabled_tool_defs = get_enabled_tools(self.enabled_tools)
-                            async for chunk in llm.stream_complete(followup_messages, tools=enabled_tool_defs if enabled_tool_defs else None):
-                                if chunk.startswith("data: "):
+                            for iteration in range(self.MAX_TOOL_ITERATIONS):
+                                print(f"[Voice Session] Agent loop iteration {iteration+1}/{self.MAX_TOOL_ITERATIONS}")
+                                followup_messages = list(self.conversation_history)
+                                next_tool_calls = None
+                                async for chunk in llm.stream_complete(
+                                    followup_messages,
+                                    tools=enabled_tool_defs if enabled_tool_defs else None,
+                                ):
+                                    if not chunk.startswith("data: "):
+                                        continue
                                     try:
                                         data = json.loads(chunk[6:])
-                                        if "content" in data and data["content"]:
-                                            tool_final_response += data["content"]
-                                        elif "tool_calls_complete" in data:
-                                            # Another tool call - handle recursively (for now, just break)
-                                            print(f"[Voice Session] Another tool call detected, stopping recursion")
-                                            break
+                                    except json.JSONDecodeError:
+                                        continue
+                                    if "tool_calls_complete" in data:
+                                        next_tool_calls = data["tool_calls_complete"]
+                                        break
+                                    if "content" in data and data["content"]:
+                                        piece = data["content"]
+                                        tool_final_response += piece
+                                        sentence_buf += piece
+                                        # Progressive TTS: speak each complete sentence as it forms
+                                        sentences, sentence_buf = self._extract_complete_sentences(sentence_buf)
+                                        for s in sentences:
+                                            s = s.strip()
+                                            if s:
+                                                asyncio.create_task(self.stream_tts(s))
+                                                spoke_anything = True
+                                    elif "error" in data:
+                                        print(f"[Voice Session] LLM error during agent loop: {data['error']}")
+                                if not next_tool_calls:
+                                    break
+                                # Announce continued work and execute in parallel
+                                await self.send_message("tool_invocation", {"message": "One moment…"})
+                                more_results = await self._execute_tool_calls_parallel(next_tool_calls)
+                                self.conversation_history.append({
+                                    "role": "assistant", "content": None, "tool_calls": next_tool_calls,
+                                })
+                                for tr in more_results:
+                                    self.conversation_history.append(tr)
+                                    try:
+                                        d = json.loads(tr.get("content", "{}"))
+                                        if d.get("agent_type"):
+                                            await self.send_message("agent_started", {
+                                                "agent_type": d.get("agent_type"),
+                                                "task": d.get("task", ""),
+                                            })
                                     except json.JSONDecodeError:
                                         pass
+                                tool_results.extend(more_results)  # for agent-tool detection below
+                            else:
+                                print(f"[Voice Session] ⚠️ hit MAX_TOOL_ITERATIONS={self.MAX_TOOL_ITERATIONS}")
                             
                             # Check if any of the executed tools were agents
                             is_agent_tool = False
@@ -911,7 +957,7 @@ CRITICAL INSTRUCTIONS:
                                     print(f"[Voice Session] No markdown response received")
                             
                             elif is_agent_tool and agent_type == "reasoning_assistant":
-                                # For reasoning assistant, use Nemotron for deep analysis
+                                # For reasoning assistant, call Qwen3.6 with reasoning_effort=high
                                 agent_problem = ""
                                 agent_context = ""
                                 agent_analysis_type = "general"
@@ -943,14 +989,20 @@ CRITICAL INSTRUCTIONS:
                                 tool_final_response = tool_final_response.replace("<|end|>", "")
                                 tool_final_response = tool_final_response.replace("<|start|>assistant", "")
                                 tool_final_response = tool_final_response.strip()
-                                
+
                                 if tool_final_response:
                                     print(f"[Voice Session] Tool execution final response: {tool_final_response[:100]}...")
-                                    # Add to conversation history
                                     self.conversation_history.append({"role": "assistant", "content": tool_final_response})
-                                    # Regular tool - send final response and TTS
-                                    await self.send_final_response(tool_final_response)
-                                    return  # Exit early since we've handled tool execution
+                                    if spoke_anything:
+                                        # Already streamed sentence-by-sentence. Flush the trailing
+                                        # fragment and emit the UI-only final message.
+                                        tail = (sentence_buf or "").strip()
+                                        if tail:
+                                            asyncio.create_task(self.stream_tts(tail))
+                                        await self.send_message("final_response", {"text": tool_final_response})
+                                    else:
+                                        await self.send_final_response(tool_final_response)
+                                    return
                                 else:
                                     print(f"[Voice Session] Tool execution response was empty after processing")
                             else:
@@ -1170,7 +1222,7 @@ Output the complete HTML code."""
         return ""
 
     async def execute_reasoning_agent(self, problem: str, context: str = "", analysis_type: str = "general"):
-        """Execute the Nemotron reasoning agent - shows thinking inline, then speaks conclusion."""
+        """Execute the deep-reasoning agent (Qwen3.6, effort=high) - shows thinking inline, then speaks conclusion."""
         try:
             print(f"[Voice Session] Executing reasoning agent: {problem[:80]}...")
             print(f"[Voice Session] Analysis type: {analysis_type}")
@@ -1187,15 +1239,15 @@ Output the complete HTML code."""
                 "analysis_type": analysis_type
             })
             
-            # Create Nemotron client
-            nemotron = NemotronClient(NemotronConfig())
-            
+            # Deep-reasoning via the same Qwen3.6 model, reasoning_effort=high
+            reasoner = ReasoningClient(ReasoningConfig())
+
             thinking_response = ""
             content_response = ""
             chunk_count = 0
-            
+
             # Stream the reasoning process
-            async for chunk in nemotron.stream_reasoning(problem, context, analysis_type):
+            async for chunk in reasoner.stream_reasoning(problem, context, analysis_type):
                 chunk_count += 1
                 if chunk_count <= 5:
                     print(f"[Voice Session] Reasoning chunk {chunk_count}: {chunk[:100]}...")
@@ -1636,31 +1688,90 @@ async def voice_call(websocket: WebSocket):
 
                                     # Handle tool calls
                                     if tool_calls:
-                                        print(f"[Video Call] Tool calls: {[tc.get('function', {}).get('name') for tc in tool_calls]}")
+                                        tool_names = [tc.get('function', {}).get('name') for tc in tool_calls]
+                                        print(f"[Video Call] Tool calls: {tool_names}")
+
+                                        # Short-circuit to UI-dispatched agent tools (they stream their own output)
+                                        agent_dispatched = False
                                         for tool_call in tool_calls:
                                             func = tool_call.get("function", {})
                                             tool_name = func.get("name")
                                             try:
                                                 args = json.loads(func.get("arguments", "{}"))
-                                            except:
+                                            except Exception:
                                                 args = {}
+                                            if tool_name in ("markdown_assistant", "html_assistant", "reasoning_assistant"):
+                                                await session.stream_tts("On it.", is_transient=True)
+                                                if tool_name == "markdown_assistant":
+                                                    await session.execute_markdown_agent(args.get("task", ""), args.get("context", ""))
+                                                elif tool_name == "html_assistant":
+                                                    await session.execute_html_agent(args.get("task", ""), args.get("context", ""))
+                                                elif tool_name == "reasoning_assistant":
+                                                    await session.execute_reasoning_agent(
+                                                        args.get("problem", ""),
+                                                        args.get("context", ""),
+                                                        args.get("analysis_type", "general"),
+                                                    )
+                                                agent_dispatched = True
+                                                break
 
-                                            print(f"[Video Call] Tool '{tool_name}' args: {args}")
+                                        if not agent_dispatched:
+                                            # Inline tools: parallel exec + text-only agent loop to synthesize reply
+                                            await session.stream_tts("Looking into it.", is_transient=True)
+                                            session.conversation_history.append({
+                                                "role": "assistant", "content": None, "tool_calls": tool_calls,
+                                            })
+                                            tool_results = await session._execute_tool_calls_parallel(tool_calls)
+                                            for tr in tool_results:
+                                                session.conversation_history.append(tr)
 
-                                            # Send acknowledgment
-                                            await session.stream_tts("On it.", is_transient=True)
+                                            synth_text = ""
+                                            sb = ""
+                                            progressive = False
+                                            for _ in range(session.MAX_TOOL_ITERATIONS):
+                                                next_calls = None
+                                                async for chunk in llm.stream_complete(
+                                                    list(session.conversation_history),
+                                                    tools=enabled_tool_defs if enabled_tool_defs else None,
+                                                ):
+                                                    if not chunk.startswith("data: "):
+                                                        continue
+                                                    try:
+                                                        d = json.loads(chunk[6:])
+                                                    except json.JSONDecodeError:
+                                                        continue
+                                                    if "tool_calls_complete" in d:
+                                                        next_calls = d["tool_calls_complete"]
+                                                        break
+                                                    if "content" in d and d["content"]:
+                                                        piece = d["content"]
+                                                        synth_text += piece
+                                                        sb += piece
+                                                        sents, sb = session._extract_complete_sentences(sb)
+                                                        for s in sents:
+                                                            s = s.strip()
+                                                            if s:
+                                                                asyncio.create_task(session.stream_tts(s))
+                                                                progressive = True
+                                                if not next_calls:
+                                                    break
+                                                await session.send_message("tool_invocation", {"message": "One moment…"})
+                                                more = await session._execute_tool_calls_parallel(next_calls)
+                                                session.conversation_history.append({
+                                                    "role": "assistant", "content": None, "tool_calls": next_calls,
+                                                })
+                                                for tr in more:
+                                                    session.conversation_history.append(tr)
 
-                                            # Execute tool
-                                            if tool_name == "markdown_assistant":
-                                                await session.execute_markdown_agent(args.get("task", ""), args.get("context", ""))
-                                            elif tool_name == "html_assistant":
-                                                await session.execute_html_agent(args.get("task", ""), args.get("context", ""))
-                                            elif tool_name == "reasoning_assistant":
-                                                await session.execute_reasoning_agent(
-                                                    args.get("problem", ""),
-                                                    args.get("context", ""),
-                                                    args.get("analysis_type", "general")
-                                                )
+                                            if synth_text.strip():
+                                                session.conversation_history.append({"role": "assistant", "content": synth_text})
+                                                await session.send_message("llm_final", {"text": synth_text})
+                                                if progressive:
+                                                    tail = sb.strip()
+                                                    if tail:
+                                                        asyncio.create_task(session.stream_tts(tail))
+                                                else:
+                                                    await session.stream_tts(synth_text)
                                     else:
                                         # Regular response - speak it
                                         if response_text:

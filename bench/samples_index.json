@@ -1,0 +1,107 @@
+{
+  "kokoro_cuda": {
+    "short": {
+      "synth_ms": 52.0,
+      "audio_ms": 1375.0,
+      "rtf": 0.038,
+      "path": "/workspace/realtime2/bench/samples/kokoro_cuda/short.wav"
+    },
+    "mid": {
+      "synth_ms": 49.0,
+      "audio_ms": 2175.0,
+      "rtf": 0.023,
+      "path": "/workspace/realtime2/bench/samples/kokoro_cuda/mid.wav"
+    },
+    "long": {
+      "synth_ms": 78.4,
+      "audio_ms": 5275.0,
+      "rtf": 0.015,
+      "path": "/workspace/realtime2/bench/samples/kokoro_cuda/long.wav"
+    },
+    "xlong": {
+      "synth_ms": 160.3,
+      "audio_ms": 10800.0,
+      "rtf": 0.015,
+      "path": "/workspace/realtime2/bench/samples/kokoro_cuda/xlong.wav"
+    }
+  },
+  "kokoro_cpu": {
+    "short": {
+      "synth_ms": 574.7,
+      "audio_ms": 1375.0,
+      "rtf": 0.418,
+      "path": "/workspace/realtime2/bench/samples/kokoro_cpu/short.wav"
+    },
+    "mid": {
+      "synth_ms": 881.0,
+      "audio_ms": 2175.0,
+      "rtf": 0.405,
+      "path": "/workspace/realtime2/bench/samples/kokoro_cpu/mid.wav"
+    },
+    "long": {
+      "synth_ms": 1223.3,
+      "audio_ms": 5275.0,
+      "rtf": 0.232,
+      "path": "/workspace/realtime2/bench/samples/kokoro_cpu/long.wav"
+    },
+    "xlong": {
+      "synth_ms": 2246.7,
+      "audio_ms": 10800.0,
+      "rtf": 0.208,
+      "path": "/workspace/realtime2/bench/samples/kokoro_cpu/xlong.wav"
+    }
+  },
+  "chatterbox_cuda": {
+    "short": {
+      "synth_ms": 692.5,
+      "audio_ms": 880.0,
+      "rtf": 0.787,
+      "path": "/workspace/realtime2/bench/samples/chatterbox_cuda/short.wav"
+    },
+    "mid": {
+      "synth_ms": 1457.6,
+      "audio_ms": 2360.0,
+      "rtf": 0.618,
+      "path": "/workspace/realtime2/bench/samples/chatterbox_cuda/mid.wav"
+    },
+    "long": {
+      "synth_ms": 2284.3,
+      "audio_ms": 4080.0,
+      "rtf": 0.56,
+      "path": "/workspace/realtime2/bench/samples/chatterbox_cuda/long.wav"
+    },
+    "xlong": {
+      "synth_ms": 5157.5,
+      "audio_ms": 9360.0,
+      "rtf": 0.551,
+      "path": "/workspace/realtime2/bench/samples/chatterbox_cuda/xlong.wav"
+    }
+  },
+  "vibevoice_cuda": {
+    "short": {
+      "synth_ms": 1740,
+      "audio_ms": 1730,
+      "rtf": 1.0,
+      "path": "bench/samples/vibevoice/short.wav"
+    },
+    "mid": {
+      "synth_ms": 1800,
+      "audio_ms": 2800,
+      "rtf": 0.64,
+      "path": "bench/samples/vibevoice/mid.wav"
+    },
+    "long": {
+      "synth_ms": 3670,
+      "audio_ms": 6800,
+      "rtf": 0.54,
+      "path": "bench/samples/vibevoice/long.wav"
+    },
+    "xlong": {
+      "synth_ms": 7060,
+      "audio_ms": 13730,
+      "rtf": 0.51,
+      "path": "bench/samples/vibevoice/xlong.wav"
+    },
+    "_notes": "speaker=Grace, cfg_scale=1.5, SDPA attention (flash-attn would improve)"
+  }
+}
