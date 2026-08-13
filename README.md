@@ -89,7 +89,7 @@ curl -s http://localhost:11434/v1/chat/completions \
 ### 2. Run the chatbot (Docker)
 
 ```bash
-git clone https://github.com/kedarpotdar-nv/spark-realtime-chatbot
+git clone -b claw https://github.com/kedarpotdar-nv/spark-realtime-chatbot
 cd spark-realtime-chatbot
 docker build -t spark-realtime-chatbot .
 docker run --gpus all --net host -it --init \
