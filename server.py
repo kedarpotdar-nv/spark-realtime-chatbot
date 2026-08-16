@@ -280,22 +280,9 @@ class VoiceSession:
         # so user speech / disconnect can cancel it.
         self._claw_in_flight: bool = False
         self._claw_bridge_ref = None  # the ClawAcp singleton, set when streaming starts
-
-    async def cancel_claw_in_flight(self) -> None:
-        """Cancel any in-flight Claw streaming turn (barge-in / user spoke again)."""
-        if not self._claw_in_flight:
-            return
-        bridge = self._claw_bridge_ref
-        if bridge is None:
-            return
-        try:
-            print("[Voice Session] barge-in: cancelling in-flight Claw turn")
-            await bridge.cancel()
-        except Exception as e:
-            print(f"[Voice Session] cancel_claw_in_flight failed: {e}")
         self.selected_voice = os.getenv("KOKORO_VOICE", "af_bella")  # Default voice
         self.enabled_tools = []  # Default: no tools enabled
-        
+
         # Import system prompt from prompts.py
         from prompts import DEFAULT_SYSTEM_PROMPT
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
@@ -309,6 +296,19 @@ class VoiceSession:
         # Once set, every streaming loop should bail out of its LLM read.
         # Set by send_message/send_audio_chunk when the WS is gone.
         self._ws_closed: bool = False
+
+    async def cancel_claw_in_flight(self) -> None:
+        """Cancel any in-flight Claw streaming turn (barge-in / user spoke again)."""
+        if not self._claw_in_flight:
+            return
+        bridge = self._claw_bridge_ref
+        if bridge is None:
+            return
+        try:
+            print("[Voice Session] barge-in: cancelling in-flight Claw turn")
+            await bridge.cancel()
+        except Exception as e:
+            print(f"[Voice Session] cancel_claw_in_flight failed: {e}")
 
     @property
     def alive(self) -> bool:
