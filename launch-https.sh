@@ -1,9 +1,9 @@
 #!/bin/bash
-# Launch script for spark-realtime-chatbot
+# Launch script for spark-realtime
 
 # Default configuration - override with environment variables
 export ASR_MODE="${ASR_MODE:-api}"  # "api" for server, "local" for in-process
-export ASR_API_URL="${ASR_API_URL:-http://localhost:8000/v1/audio/transcriptions}"
+export ASR_API_URL="${ASR_API_URL:-http://localhost:9000/v1/audio/transcriptions}"
 export ASR_API_KEY="${ASR_API_KEY:-dummy-key}"
 export ASR_MODEL="${ASR_MODEL:-Systran/faster-whisper-small.en}"
 export ASR_DEVICE="${ASR_DEVICE:-cuda}"
@@ -18,6 +18,9 @@ export VLM_SERVER_URL="${VLM_SERVER_URL:-http://localhost:8080/v1/chat/completio
 export VLM_MODEL="${VLM_MODEL:-qwen3-vl}"
 export VLM_MAX_TOKENS="${VLM_MAX_TOKENS:-150}"  # Lower for faster responses
 
+export NEMOTRON_SERVER_URL="${NEMOTRON_SERVER_URL:-http://localhost:8005/v1/chat/completions}"
+export NEMOTRON_MODEL="${NEMOTRON_MODEL:-nemotron-3-nano}"
+
 export KOKORO_LANG="${KOKORO_LANG:-a}"
 export KOKORO_VOICE="${KOKORO_VOICE:-af_bella}"
 export TTS_OVERLAP="${TTS_OVERLAP:-false}"  # Overlap TTS with LLM streaming
@@ -31,7 +34,7 @@ mkdir -p "$HUGGINGFACE_HUB_CACHE"
 
 # Server bind & SSL configuration
 export HOST="${HOST:-0.0.0.0}"
-export PORT="${PORT:-8443}"
+export PORT="${PORT:-9443}"
 export SSL_ENABLED="${SSL_ENABLED:-true}"
 export SSL_KEY="${SSL_KEY:-${SSL_KEYFILE:-key.pem}}"
 export SSL_CERT="${SSL_CERT:-${SSL_CERTFILE:-cert.pem}}"
@@ -111,7 +114,7 @@ if [ "$SSL_ENABLED" != "true" ]; then
 fi
 
 echo "=========================================="
-echo "Launching spark-realtime-chatbot ($SCHEME)"
+echo "Launching spark-realtime ($SCHEME)"
 echo "=========================================="
 echo "ASR Mode: $ASR_MODE"
 if [ "$ASR_MODE" == "local" ]; then
@@ -127,6 +130,8 @@ echo "LLM Max Tokens: $LLM_MAX_TOKENS"
 echo "VLM URL: $VLM_SERVER_URL"
 echo "VLM Model: $VLM_MODEL"
 echo "VLM Max Tokens: $VLM_MAX_TOKENS"
+echo "Nemotron URL: $NEMOTRON_SERVER_URL"
+echo "Nemotron Model: $NEMOTRON_MODEL"
 echo "TTS Overlap: $TTS_OVERLAP"
 echo "HF Cache: $HUGGINGFACE_HUB_CACHE"
 echo "Bind: ${HOST}:${PORT} ($SCHEME)"

@@ -1,5 +1,5 @@
 # =============================================================================
-# spark-realtime-chatbot Dependencies (Docker Reference)
+# spark-realtime Dependencies (Docker Reference)
 # =============================================================================
 # These are the pinned versions from a known working configuration.
 # The Dockerfile installs these packages; this file is for reference.

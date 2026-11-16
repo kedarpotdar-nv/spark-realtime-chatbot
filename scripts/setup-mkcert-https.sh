@@ -1,5 +1,5 @@
 #!/bin/bash
-# Generate locally-trusted LAN HTTPS certificates using mkcert for spark-realtime-chatbot.
+# Generate locally-trusted LAN HTTPS certificates using mkcert for spark-realtime.
 #
 # Generates cert.pem and key.pem covering:
 #   - localhost, 127.0.0.1, ::1

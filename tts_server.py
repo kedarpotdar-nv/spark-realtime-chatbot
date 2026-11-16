@@ -18,7 +18,7 @@ Endpoints:
 
 Run:
   python tts_server.py
-  # listens on http://0.0.0.0:${TTS_PORT:-8002}
+  # listens on http://0.0.0.0:${TTS_PORT:-9002}
 
 Picks engine/voice/device from TTSConfig (env vars: TTS_ENGINE, TTS_DEVICE,
 KOKORO_VOICE, KOKORO_SPEED, etc.). On startup, loads the pipeline and runs
@@ -157,5 +157,5 @@ async def tts(req: TTSRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("TTS_PORT", "8002"))
+    port = int(os.environ.get("TTS_PORT", "9002"))
     uvicorn.run("tts_server:app", host="0.0.0.0", port=port, log_level="info")

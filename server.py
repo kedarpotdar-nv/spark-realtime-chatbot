@@ -1,4 +1,4 @@
-"""spark-realtime-chatbot - Real-time Voice Chatbot Server.
+"""spark-realtime - Real-time Voice Chatbot Server.
 
 A WebSocket-based voice assistant using:
 - Faster-Whisper for ASR

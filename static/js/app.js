@@ -1,4 +1,4 @@
-// spark-realtime-chatbot Application
+// spark-realtime Application
 
 // Initialize mermaid for diagram rendering
 if (typeof mermaid !== 'undefined') {

@@ -1,4 +1,4 @@
-"""Configuration dataclasses for spark-realtime-chatbot."""
+"""Configuration dataclasses for spark-realtime."""
 
 import os
 from dataclasses import dataclass
@@ -9,7 +9,7 @@ from pathlib import Path
 class ASRConfig:
     """Automatic Speech Recognition configuration."""
     mode: str = os.getenv("ASR_MODE", "api")  # "api" for server, "local" for in-process
-    api_url: str = os.getenv("ASR_API_URL", "http://localhost:8000/v1/audio/transcriptions")
+    api_url: str = os.getenv("ASR_API_URL", "http://localhost:9000/v1/audio/transcriptions")
     api_key: str = os.getenv("ASR_API_KEY", "dummy-key")
     model: str = os.getenv("ASR_MODEL", "Systran/faster-whisper-small.en")
     # Local mode settings
@@ -61,7 +61,7 @@ class TTSConfig:
 class ServerConfig:
     """HTTP / HTTPS server bind and TLS configuration."""
     host: str = os.getenv("HOST", "0.0.0.0")
-    port: int = int(os.getenv("PORT", "8443"))
+    port: int = int(os.getenv("PORT", "9443"))
     ssl_enabled: bool = os.getenv("SSL_ENABLED", "true").lower() == "true"
     ssl_keyfile: str = os.getenv("SSL_KEY", os.getenv("SSL_KEYFILE", "key.pem"))
     ssl_certfile: str = os.getenv("SSL_CERT", os.getenv("SSL_CERTFILE", "cert.pem"))

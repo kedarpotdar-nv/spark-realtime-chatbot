@@ -1,6 +1,6 @@
 """
-System Prompts for spark-realtime-chatbot
-=========================================
+System Prompts for spark-realtime
+=================================
 
 Edit these prompts to customize assistant behavior.
 Changes take effect after server restart.

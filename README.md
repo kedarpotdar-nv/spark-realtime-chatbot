@@ -1,6 +1,16 @@
-# spark-realtime-chatbot
+# spark-realtime
 
 A real-time voice and vision AI assistant running locally on NVIDIA DGX Spark — streaming speech recognition (ASR), vision-language models (VLM/LLM), face recognition, and text-to-speech (TTS), all on a single Grace Blackwell GB10.
+
+> **Fork & Coexistence Note**: This repository (`sammyjason39/spark-realtime`) is a fork of [`kedarpotdar-nv/spark-realtime-chatbot`](https://github.com/kedarpotdar-nv/spark-realtime-chatbot). To run alongside the original app on the same DGX Spark without port collisions, **this fork runs on port `9443` by default** (+1000 offset from the original's `8443`), offsets its own optional standalone servers by +1000, and shares the GPU-heavy `llama-server` instances on ports `8080` and `8005` by default:
+>
+> | Service | Fork Default (`spark-realtime`) | Original Default (`spark-realtime-chatbot`) | Env Var / Flag | Coexistence Behavior |
+> |---------|---------------------------------|---------------------------------------------|----------------|----------------------|
+> | **Web App (HTTPS + `/ws/voice` WSS)** | `9443` | `8443` | `PORT` / `--port` | Offset (+1000) — runs concurrently |
+> | **External ASR API Server** (`ASR_MODE=api`) | `9000` | `8000` | `ASR_API_URL` | Offset (+1000) — optional; `--local-asr` runs in-process |
+> | **Standalone TTS HTTP Server** (`tts_server.py`) | `9002` | `8002` | `TTS_PORT` | Offset (+1000) — optional standalone wrapper |
+> | **LLM / VLM `llama-server` (Qwen3-VL)** | `8080` | `8080` | `LLM_SERVER_URL`, `VLM_SERVER_URL` | Shared by default (~20 GB VRAM); set to `:9080` for a separate instance |
+> | **Reasoning `llama-server` (Nemotron 3 Nano)** | `8005` | `8005` | `NEMOTRON_SERVER_URL` | Shared by default (~18 GB VRAM); set to `:9005` for a separate instance |
 
 ![Demo](demo.png)
 
@@ -45,8 +55,8 @@ fi
 
 # 3. Clone this repository
 cd ~
-git clone https://github.com/sammyjason39/spark-realtime-chatbot.git
-cd ~/spark-realtime-chatbot
+git clone https://github.com/sammyjason39/spark-realtime.git
+cd ~/spark-realtime
 
 # 4. Generate locally-trusted LAN HTTPS certificates (cert.pem & key.pem)
 ./scripts/setup-mkcert-https.sh
@@ -72,28 +82,30 @@ wget -c -O ~/models/mmproj-Qwen3VL-30B-A3B-Instruct-Q8_0.gguf \
 # wget -c -O ~/models/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf \
 #     https://huggingface.co/unsloth/Nemotron-3-Nano-30B-A3B-GGUF/resolve/main/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf
 
-# 7. Start llama-server in the background for Qwen3-VL on port 8080
-nohup ~/llama.cpp/build/bin/llama-server \
-    -m ~/models/Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf \
-    --mmproj ~/models/mmproj-Qwen3VL-30B-A3B-Instruct-Q8_0.gguf \
-    --host 0.0.0.0 --port 8080 \
-    -ngl 99 -c 8192 --threads 8 --threads-http 8 -fa on --cache-reuse 256 \
-    > ~/llama-qwen3vl.log 2>&1 &
+# 7. Start llama-server in the background for Qwen3-VL on port 8080 (if not already running)
+if ! curl -fsS http://localhost:8080/health >/dev/null 2>&1; then
+    nohup ~/llama.cpp/build/bin/llama-server \
+        -m ~/models/Qwen3VL-30B-A3B-Instruct-Q4_K_M.gguf \
+        --mmproj ~/models/mmproj-Qwen3VL-30B-A3B-Instruct-Q8_0.gguf \
+        --host 0.0.0.0 --port 8080 \
+        -ngl 99 -c 8192 --threads 8 --threads-http 8 -fa on --cache-reuse 256 \
+        > ~/llama-qwen3vl.log 2>&1 &
+fi
 
 # Wait until llama-server reports healthy
 until curl -fsS http://localhost:8080/health >/dev/null 2>&1; do sleep 2; done
 
-# 8. Build and start the spark-realtime-chatbot Docker container
-cd ~/spark-realtime-chatbot
-docker build -t spark-realtime-chatbot .
-docker run -d --name spark-chatbot --gpus all --net host --init \
+# 8. Build and start the spark-realtime Docker container
+cd ~/spark-realtime
+docker build -t spark-realtime .
+docker run -d --name spark-realtime --gpus all --net host --init \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -v "$(pwd)/cert.pem:/app/cert.pem:ro" \
     -v "$(pwd)/key.pem:/app/key.pem:ro" \
-    spark-realtime-chatbot
+    spark-realtime
 
-# 9. Verify the server is healthy (allow ~30-60s on first start for ASR/TTS warmup)
-until curl -k -fsS https://localhost:8443/health; do sleep 2; done
+# 9. Verify the server is healthy on port 9443 (allow ~30-60s on first start for ASR/TTS warmup)
+until curl -k -fsS https://localhost:9443/health; do sleep 2; done
 ```
 
 ---
@@ -114,8 +126,8 @@ until curl -k -fsS https://localhost:8443/health; do sleep 2; done
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/sammyjason39/spark-realtime-chatbot.git
-cd spark-realtime-chatbot
+git clone https://github.com/sammyjason39/spark-realtime.git
+cd spark-realtime
 ```
 
 ### 2. Build `llama.cpp` with CUDA
@@ -158,7 +170,7 @@ wget -c -O ~/models/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf \
 
 ### 4. Start the LLM Servers
 
-Start `llama-server` on the host in separate terminals (or via `tmux` / `nohup`):
+Start `llama-server` on the host in separate terminals (or via `tmux` / `nohup`). If you are already running `llama-server` on ports `8080` / `8005` for `spark-realtime-chatbot`, you can share those running instances directly without launching duplicates.
 
 **Terminal 1 — Qwen3-VL (Main Chat & Vision Model on port `8080`, required):**
 ```bash
@@ -187,7 +199,7 @@ Two HTTPS modes are supported:
 
 ### Mode 1: `mkcert` — Trusted Local CA on LAN (Primary, Recommended)
 
-[`mkcert`](https://github.com/FiloSottile/mkcert) creates a local Certificate Authority (CA) on your Spark and signs a TLS certificate covering `localhost`, `127.0.0.1`, `<hostname>`, `<hostname>.local`, and the Spark's LAN IPv4 address. Once you trust its `rootCA.pem` on your Mac and iPhone/iPad, `https://<spark-hostname>.local:8443` and `https://<spark-lan-ip>:8443` open with a green lock and **zero browser warnings**.
+[`mkcert`](https://github.com/FiloSottile/mkcert) creates a local Certificate Authority (CA) on your Spark and signs a TLS certificate covering `localhost`, `127.0.0.1`, `<hostname>`, `<hostname>.local`, and the Spark's LAN IPv4 address. Once you trust its `rootCA.pem` on your Mac and iPhone/iPad, `https://<spark-hostname>.local:9443` and `https://<spark-lan-ip>:9443` open with a green lock and **zero browser warnings**.
 
 #### 1. Install `mkcert` on the DGX Spark (ARM64)
 
@@ -256,14 +268,14 @@ The `Dockerfile` compiles `CTranslate2` from source with CUDA 13.0 support for G
 
 ```bash
 # 1. Build the Docker image
-docker build -t spark-realtime-chatbot .
+docker build -t spark-realtime .
 
 # 2. Run (first time — downloads Whisper & Kokoro weights to ~/.cache/huggingface)
 docker run --gpus all --net host -it --init \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -v "$(pwd)/cert.pem:/app/cert.pem:ro" \
     -v "$(pwd)/key.pem:/app/key.pem:ro" \
-    spark-realtime-chatbot
+    spark-realtime
 
 # 3. Run (subsequent — offline mode using cached models)
 docker run --gpus all --net host -it --init \
@@ -271,7 +283,7 @@ docker run --gpus all --net host -it --init \
     -v "$(pwd)/cert.pem:/app/cert.pem:ro" \
     -v "$(pwd)/key.pem:/app/key.pem:ro" \
     -e HF_HUB_OFFLINE=1 \
-    spark-realtime-chatbot
+    spark-realtime
 ```
 
 > **Note**: If your HuggingFace account requires authentication for any gated models, add `-e HF_TOKEN=<your_hf_token>` on the first run.
@@ -308,9 +320,9 @@ python -m spacy download en_core_web_sm
 
 - **Local in-process ASR (`--local-asr`, recommended)**: Runs `faster-whisper` directly inside the Python process.
   - *Note*: Pre-built `ctranslate2` wheels on PyPI may not include `sm_121` CUDA kernels; if `ctranslate2` lacks CUDA support on the host, `LocalWhisperASR` automatically falls back to CPU `float32`, or you can build `CTranslate2` from source with `-DWITH_CUDA=ON` and `CUDAARCHS=121` (see Stage 2 of `Dockerfile`).
-- **External ASR Server (`ASR_MODE=api`, default without `--local-asr`)**: Expects an OpenAI-compatible transcription server at `http://localhost:8000/v1/audio/transcriptions`:
+- **External ASR Server (`ASR_MODE=api`, default without `--local-asr`)**: Expects an OpenAI-compatible transcription server at `http://localhost:9000/v1/audio/transcriptions` (offset from `8000` so it will not clash with the original app's external ASR container):
   ```bash
-  docker run --gpus=all --net host \
+  docker run --gpus=all -p 9000:8000 \
       -v ~/.cache/huggingface:/root/.cache/huggingface \
       fedirz/faster-whisper-server:latest-cuda
   ```
@@ -321,58 +333,58 @@ python -m spacy download en_core_web_sm
 # Ensure HF_HOME points to a writable directory (launch-https.sh defaults to /home/nvidia/hfcache)
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 
-# Launch with local ASR and overlapped TTS streaming (recommended)
+# Launch with local ASR and overlapped TTS streaming on default port 9443 (recommended)
 ./launch-https.sh --local-asr --tts-overlap
 
-# Or launch with external ASR server on port 8000
+# Or launch with external ASR server on port 9000
 ./launch-https.sh
 ```
 
 `launch-https.sh` also accepts CLI flags to override bind and TLS settings:
 ```bash
-./launch-https.sh --host 0.0.0.0 --port 8443 --ssl-cert cert.pem --ssl-key key.pem --local-asr --tts-overlap
+./launch-https.sh --host 0.0.0.0 --port 9443 --ssl-cert cert.pem --ssl-key key.pem --local-asr --tts-overlap
 ```
 
 ---
 
 ## Verifying the Installation
 
-Once `llama-server` and `spark-realtime-chatbot` are running, run these checks on the Spark:
+Once `llama-server` and `spark-realtime` are running, run these checks on the Spark:
 
 ```bash
 # 1. Verify Qwen3-VL llama-server is healthy
 curl -fsS http://localhost:8080/health
 # Expected: {"status":"ok"}
 
-# 2. Verify the FastAPI HTTPS server is healthy
-curl -k -fsS https://localhost:8443/health
+# 2. Verify the FastAPI HTTPS server is healthy on port 9443
+curl -k -fsS https://localhost:9443/health
 # Expected: {"status":"ok"}
 
 # 3. Verify the API responds with the system prompt
-curl -k -fsS https://localhost:8443/api/default_prompt | head -c 120
+curl -k -fsS https://localhost:9443/api/default_prompt | head -c 120
 
 # 4. If using mkcert, verify TLS passes WITHOUT -k against the local CA
-curl --cacert "$(mkcert -CAROOT)/rootCA.pem" -fsS https://localhost:8443/health
+curl --cacert "$(mkcert -CAROOT)/rootCA.pem" -fsS https://localhost:9443/health
 # Expected: {"status":"ok"}
 ```
 
 Then open the web UI in your browser:
-- **On the Spark**: `https://localhost:8443`
-- **From your Mac or iPhone on LAN**: `https://<spark-hostname>.local:8443` or `https://<spark-lan-ip>:8443`
+- **On the Spark**: `https://localhost:9443`
+- **From your Mac or iPhone on LAN**: `https://<spark-hostname>.local:9443` or `https://<spark-lan-ip>:9443`
 
-When the page loads, the status badge at the top will switch from **Connecting...** to **Connected**, and the assistant will speak a short greeting over the `/ws/voice` WebSocket (`wss://<host>:8443/ws/voice`).
+When the page loads, the status badge at the top will switch from **Connecting...** to **Connected**, and the assistant will speak a short greeting over the `/ws/voice` WebSocket (`wss://<host>:9443/ws/voice`).
 
 ---
 
 ## Configuration & Environment Variables
 
-All configuration options live in `config.py` and `launch-https.sh`. Override them via environment variables (or `-e VAR=value` in `docker run`):
+All configuration options live in `config.py`, `launch-https.sh`, and `tts_server.py`. Override them via environment variables (or `-e VAR=value` in `docker run`):
 
 | Variable | Default (`config.py` / `launch-https.sh`) | Description |
 |----------|-------------------------------------------|-------------|
 | **Server & TLS** | | |
 | `HOST` | `0.0.0.0` | Server bind address |
-| `PORT` | `8443` | Server port |
+| `PORT` | `9443` | Server port (offset from `8443` to coexist with `spark-realtime-chatbot`) |
 | `SSL_ENABLED` | `true` | Enable HTTPS in Uvicorn (`false` for plain HTTP with `--http` / `--no-ssl`) |
 | `SSL_CERT` | `cert.pem` | Path to TLS certificate file (alias: `SSL_CERTFILE`) |
 | `SSL_KEY` | `key.pem` | Path to TLS private key file (alias: `SSL_KEYFILE`) |
@@ -381,22 +393,22 @@ All configuration options live in `config.py` and `launch-https.sh`. Override th
 | `ASR_MODEL` | `Systran/faster-distil-whisper-large-v3` (Docker) / `Systran/faster-whisper-small.en` (`launch-https.sh`) | Whisper model ID on HuggingFace |
 | `ASR_DEVICE` | `cuda` | Inference device for local ASR (`cuda` or `cpu`) |
 | `ASR_COMPUTE_TYPE` | `float16` | CTranslate2 compute type (`float16`, `int8`, `float32`) |
-| `ASR_API_URL` | `http://localhost:8000/v1/audio/transcriptions` | Endpoint used when `ASR_MODE=api` |
+| `ASR_API_URL` | `http://localhost:9000/v1/audio/transcriptions` | Endpoint used when `ASR_MODE=api` (offset from `8000`) |
 | `ASR_API_KEY` | `dummy-key` | Bearer token for `ASR_API_URL` |
 | **LLM (Text Chat)** | | |
-| `LLM_SERVER_URL` | `http://localhost:8080/v1/chat/completions` | OpenAI-compatible chat completions URL |
+| `LLM_SERVER_URL` | `http://localhost:8080/v1/chat/completions` | OpenAI-compatible chat completions URL (shared with original stack by default; e.g. `:9080` if separate) |
 | `LLM_MODEL` | `qwen3-vl` | Model identifier sent in API payload |
 | `LLM_TEMP` | `0.7` | Sampling temperature |
 | `LLM_MAX_TOKENS` | `4096` | Maximum generated tokens |
 | `LLM_REASONING_EFFORT` | `low` | Reasoning effort (`low`, `medium`, `high`, `off`) |
 | `LLM_BACKEND` | `llama` | Backend type (`llama` or `trtllm` with `--trtllm`) |
 | **VLM (Video Call Vision)** | | |
-| `VLM_SERVER_URL` | `http://localhost:8080/v1/chat/completions` | OpenAI-compatible vision chat completions URL |
+| `VLM_SERVER_URL` | `http://localhost:8080/v1/chat/completions` | OpenAI-compatible vision chat completions URL (shared with original stack by default; e.g. `:9080` if separate) |
 | `VLM_MODEL` | `qwen3-vl` | Vision model identifier |
 | `VLM_TEMP` | `0.3` | Sampling temperature for vision queries |
 | `VLM_MAX_TOKENS` | `150` (`launch-https.sh`) / `4000` (`config.py`) | Max tokens for vision responses |
 | **Nemotron (Reasoning Agent)** | | |
-| `NEMOTRON_SERVER_URL` | `http://localhost:8005/v1/chat/completions` | Nemotron reasoning server endpoint |
+| `NEMOTRON_SERVER_URL` | `http://localhost:8005/v1/chat/completions` | Nemotron reasoning server endpoint (shared with original stack by default; e.g. `:9005` if separate) |
 | `NEMOTRON_MODEL` | `nemotron-3-nano` | Reasoning model identifier |
 | `NEMOTRON_TEMP` | `1.0` | Sampling temperature |
 | `NEMOTRON_TOP_P` | `1.0` | Top-p nucleus sampling |
@@ -407,6 +419,7 @@ All configuration options live in `config.py` and `launch-https.sh`. Override th
 | `KOKORO_SPEED` | `1.2` | Speech playback speed multiplier |
 | `TTS_OVERLAP` | `false` (`true` in Docker / `--tts-overlap`) | Stream TTS sentence-by-sentence in parallel with LLM output |
 | `TTS_DEVICE` | `cuda` (Docker) / `cpu` (`config.py`) | PyTorch device for Kokoro TTS (`cuda` or `cpu`) |
+| `TTS_PORT` | `9002` | Standalone `tts_server.py` HTTP server port (offset from `8002`) |
 | **System Paths** | | |
 | `HF_HOME` | `/home/nvidia/hfcache` (`launch-https.sh`) / `/root/.cache/huggingface` (Docker) | HuggingFace cache directory |
 | `FFMPEG_PATH` | `ffmpeg` | Path to `ffmpeg` binary |
@@ -420,12 +433,14 @@ All configuration options live in `config.py` and `launch-https.sh`. Override th
   2. If running in Docker, verify you mounted the generated `cert.pem` and `key.pem` into `/app/cert.pem` and `/app/key.pem`. Otherwise, the container generates a new self-signed certificate inside its ephemeral filesystem.
   3. On iOS, installing the configuration profile in **Settings → General → VPN & Device Management** is only step one — you must also enable full trust in **Settings → General → About → Certificate Trust Settings**.
 - **Microphone or camera access fails (`Microphone access not available. Use https or localhost`)**:
-  - Browsers block `navigator.mediaDevices.getUserMedia` on insecure origins (`http://<lan-ip>:8443`). Always connect via `https://`.
+  - Browsers block `navigator.mediaDevices.getUserMedia` on insecure origins (`http://<lan-ip>:9443`). Always connect via `https://`.
 - **WebSocket stays stuck on "Connecting..." or immediately disconnects**:
-  - Open the browser console or click **Toggle Debug Log** in the bottom-right corner. If `wss://<host>:8443/ws/voice` fails with a TLS handshake error, the certificate is not trusted by the browser or does not match the hostname/IP in the address bar. Re-run `./scripts/setup-mkcert-https.sh <extra-ip-or-hostname>` to include the exact address you are visiting.
+  - Open the browser console or click **Toggle Debug Log** in the bottom-right corner. If `wss://<host>:9443/ws/voice` fails with a TLS handshake error, the certificate is not trusted by the browser or does not match the hostname/IP in the address bar. Re-run `./scripts/setup-mkcert-https.sh <extra-ip-or-hostname>` to include the exact address you are visiting.
 - **No response from assistant after speaking (`LLM server error` or connection refused)**:
   - Check that `llama-server` is running on port `8080` (`curl http://localhost:8080/health`).
   - If using Docker without `--net host`, `localhost:8080` inside the container will not reach the host's `llama-server`. Always pass `--net host` to `docker run` (or set `LLM_SERVER_URL` and `VLM_SERVER_URL` to the host IP).
+- **Port conflict when running alongside `spark-realtime-chatbot`**:
+  - `spark-realtime` defaults to port `9443` (web/WSS), `9000` (external ASR API), and `9002` (`tts_server.py`), while sharing `llama-server` on `8080` (Qwen3-VL) and `8005` (Nemotron) with the original stack (`8443`, `8000`, `8002`). Override any port with `PORT`, `ASR_API_URL`, `TTS_PORT`, `LLM_SERVER_URL`, `VLM_SERVER_URL`, or `NEMOTRON_SERVER_URL`.
 - **`WARNING: ffmpeg not found at 'ffmpeg'`**:
   - Install FFmpeg on the host (`sudo apt-get install -y ffmpeg`). FFmpeg is required to decode incoming browser WebM/Opus audio chunks into 16kHz PCM for Whisper.
 - **`cuBLAS` or `CTranslate2` errors on Grace Blackwell GB10 (`sm_121`)**:
@@ -470,10 +485,10 @@ All configuration options live in `config.py` and `launch-https.sh`. Override th
 ## Architecture
 
 ```
-Browser (HTTPS / WSS) ──► FastAPI Server (server.py) ──► llama.cpp (Qwen3-VL :8080, Nemotron :8005)
+Browser (HTTPS / WSS) ──► FastAPI Server (server.py :9443) ──► llama.cpp (Qwen3-VL :8080, Nemotron :8005)
                               │
-                              ├── ASR (faster-whisper, local or :8000)
-                              ├── TTS (Kokoro 24kHz PCM streaming)
+                              ├── ASR (faster-whisper, local or :9000)
+                              ├── TTS (Kokoro 24kHz PCM streaming, local or tts_server.py :9002)
                               └── Face Recognition (DeepFace / Facenet512)
 ```
 
@@ -481,6 +496,7 @@ Key files:
 - `server.py` — FastAPI backend and `/ws/voice` WebSocket session handler
 - `config.py` — Dataclasses for `ASRConfig`, `LLMConfig`, `VLMConfig`, `NemotronConfig`, `TTSConfig`, and `ServerConfig`
 - `launch-https.sh` — Startup script with configurable host/port/TLS and self-signed certificate fallback
+- `tts_server.py` — Optional standalone streaming TTS HTTP wrapper (`TTS_PORT`, default `9002`)
 - `scripts/setup-mkcert-https.sh` — Generates locally-trusted `mkcert` certificates for `localhost`, `<hostname>`, `<hostname>.local`, and LAN IPs
 - `clients/` — ASR, LLM, TTS, VLM, and DeepFace recognition clients
 - `static/` — Frontend single-page web application (HTML/JS/CSS)
