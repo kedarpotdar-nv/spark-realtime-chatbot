@@ -57,6 +57,16 @@ class TTSConfig:
     device: str = os.getenv("TTS_DEVICE", "cpu")  # "cuda" or "cpu" - default CPU for GB10 compatibility
 
 
+@dataclass
+class ServerConfig:
+    """HTTP / HTTPS server bind and TLS configuration."""
+    host: str = os.getenv("HOST", "0.0.0.0")
+    port: int = int(os.getenv("PORT", "8443"))
+    ssl_enabled: bool = os.getenv("SSL_ENABLED", "true").lower() == "true"
+    ssl_keyfile: str = os.getenv("SSL_KEY", os.getenv("SSL_KEYFILE", "key.pem"))
+    ssl_certfile: str = os.getenv("SSL_CERT", os.getenv("SSL_CERTFILE", "cert.pem"))
+
+
 # Directory paths
 AUDIO_DIR = Path("audio_cache")
 AUDIO_DIR.mkdir(exist_ok=True)

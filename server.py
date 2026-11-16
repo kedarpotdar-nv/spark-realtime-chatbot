@@ -23,7 +23,7 @@ from starlette.websockets import WebSocketState
 
 # Local modules
 from config import (
-    ASRConfig, LLMConfig, VLMConfig, NemotronConfig, TTSConfig,
+    ASRConfig, LLMConfig, VLMConfig, NemotronConfig, TTSConfig, ServerConfig,
     AUDIO_DIR, STATIC_DIR, SAMPLE_RATE, WORKSPACE_ROOT, FFMPEG_PATH
 )
 from audio import check_ffmpeg_available, decode_webm_bytes_to_pcm_f32
@@ -1771,3 +1771,19 @@ async def voice_chat(audio: UploadFile = File(...)):
         "assistant_text": assistant_text,
         "audio_url": audio_url,
     }
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    server_cfg = ServerConfig()
+    uvicorn_kwargs: Dict[str, Any] = {
+        "host": server_cfg.host,
+        "port": server_cfg.port,
+    }
+    if server_cfg.ssl_enabled and server_cfg.ssl_keyfile and server_cfg.ssl_certfile:
+        uvicorn_kwargs["ssl_keyfile"] = server_cfg.ssl_keyfile
+        uvicorn_kwargs["ssl_certfile"] = server_cfg.ssl_certfile
+
+    uvicorn.run("server:app", **uvicorn_kwargs)
+

@@ -1939,10 +1939,11 @@ function connectVoiceWebSocket() {
     }
   }
 
-  log(`Connecting to WebSocket: ${location.protocol === "https:" ? "wss://" : "ws://"}${location.host}/ws/voice`);
+  const wsProtocol = (window.location.protocol === "https:") ? "wss://" : "ws://";
+  const wsUrl = `${wsProtocol}${window.location.host}/ws/voice`;
+  log(`Connecting to WebSocket: ${wsUrl}`);
   setConnectionStatus("connecting");
-  const wsProtocol = (location.protocol === "https:") ? "wss://" : "ws://";
-  voiceWs = new WebSocket(wsProtocol + location.host + "/ws/voice");
+  voiceWs = new WebSocket(wsUrl);
   
   // Add connection timeout
   const connectionTimeout = setTimeout(() => {

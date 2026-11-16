@@ -29,38 +29,89 @@ export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
 # Create cache directory if it doesn't exist
 mkdir -p "$HUGGINGFACE_HUB_CACHE"
 
-# SSL certificate paths
-SSL_KEY="${SSL_KEY:-key.pem}"
-SSL_CERT="${SSL_CERT:-cert.pem}"
+# Server bind & SSL configuration
+export HOST="${HOST:-0.0.0.0}"
+export PORT="${PORT:-8443}"
+export SSL_ENABLED="${SSL_ENABLED:-true}"
+export SSL_KEY="${SSL_KEY:-${SSL_KEYFILE:-key.pem}}"
+export SSL_CERT="${SSL_CERT:-${SSL_CERTFILE:-cert.pem}}"
 
-# Port for HTTPS server (default 8443)
-PORT="${PORT:-8443}"
+# Parse command line flags
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --local-asr)
+            export ASR_MODE="local"
+            echo "✅ Local ASR enabled (in-process faster-whisper)"
+            shift
+            ;;
+        --tts-overlap)
+            export TTS_OVERLAP="true"
+            echo "✅ TTS/LLM overlap enabled (parallel TTS generation)"
+            shift
+            ;;
+        --trtllm)
+            export LLM_BACKEND="trtllm"
+            echo "✅ TensorRT-LLM backend enabled"
+            shift
+            ;;
+        --http|--no-ssl)
+            export SSL_ENABLED="false"
+            shift
+            ;;
+        --host)
+            export HOST="$2"
+            shift 2
+            ;;
+        --port)
+            export PORT="$2"
+            shift 2
+            ;;
+        --ssl-key|--ssl-keyfile)
+            export SSL_KEY="$2"
+            shift 2
+            ;;
+        --ssl-cert|--ssl-certfile)
+            export SSL_CERT="$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
 
-# Check if certificates exist
-if [ ! -f "$SSL_KEY" ] || [ ! -f "$SSL_CERT" ]; then
-    echo "=========================================="
-    echo "SSL certificates not found!"
-    echo "=========================================="
-    echo "Generating self-signed certificate..."
-    echo ""
-    openssl req -x509 -newkey rsa:4096 \
-        -keyout "$SSL_KEY" -out "$SSL_CERT" \
-        -days 365 -nodes \
-        -subj "/CN=localhost" 2>/dev/null
-    
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Failed to generate certificates. Install openssl or provide certificates manually."
+# Check if certificates exist when SSL is enabled
+if [ "$SSL_ENABLED" = "true" ]; then
+    if [ ! -f "$SSL_KEY" ] || [ ! -f "$SSL_CERT" ]; then
+        echo "=========================================="
+        echo "SSL certificates not found ($SSL_KEY, $SSL_CERT)!"
+        echo "=========================================="
+        echo "Generating self-signed fallback certificate..."
         echo ""
-        echo "To generate manually:"
-        echo "  openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes"
-        exit 1
+        openssl req -x509 -newkey rsa:4096 \
+            -keyout "$SSL_KEY" -out "$SSL_CERT" \
+            -days 365 -nodes \
+            -subj "/CN=localhost" 2>/dev/null
+
+        if [ $? -ne 0 ]; then
+            echo "ERROR: Failed to generate certificates. Install openssl or provide certificates manually."
+            echo ""
+            echo "To generate manually:"
+            echo "  openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes"
+            exit 1
+        fi
+        echo "✅ Self-signed certificates generated: $SSL_KEY, $SSL_CERT"
+        echo ""
     fi
-    echo "✅ Certificates generated: $SSL_KEY, $SSL_CERT"
-    echo ""
+fi
+
+SCHEME="HTTPS"
+if [ "$SSL_ENABLED" != "true" ]; then
+    SCHEME="HTTP"
 fi
 
 echo "=========================================="
-echo "Launching spark-realtime-chatbot (HTTPS)"
+echo "Launching spark-realtime-chatbot ($SCHEME)"
 echo "=========================================="
 echo "ASR Mode: $ASR_MODE"
 if [ "$ASR_MODE" == "local" ]; then
@@ -78,36 +129,27 @@ echo "VLM Model: $VLM_MODEL"
 echo "VLM Max Tokens: $VLM_MAX_TOKENS"
 echo "TTS Overlap: $TTS_OVERLAP"
 echo "HF Cache: $HUGGINGFACE_HUB_CACHE"
-echo "Port: $PORT (HTTPS)"
-echo "SSL Key: $SSL_KEY"
-echo "SSL Cert: $SSL_CERT"
+echo "Bind: ${HOST}:${PORT} ($SCHEME)"
+if [ "$SSL_ENABLED" = "true" ]; then
+    echo "SSL Key: $SSL_KEY"
+    echo "SSL Cert: $SSL_CERT"
+fi
 echo "=========================================="
 echo ""
-echo "⚠️  Note: If using self-signed certificate,"
-echo "   you'll need to accept browser security warning"
-echo ""
+if [ "$SSL_ENABLED" = "true" ]; then
+    echo "ℹ️  Tip: To avoid browser security warnings on LAN, generate locally-trusted"
+    echo "   certificates with mkcert: ./scripts/setup-mkcert-https.sh"
+    echo ""
+fi
 
-# Parse command line flags
-for arg in "$@"; do
-    case $arg in
-        --local-asr)
-            export ASR_MODE="local"
-            echo "✅ Local ASR enabled (in-process faster-whisper)"
-            ;;
-        --tts-overlap)
-            export TTS_OVERLAP="true"
-            echo "✅ TTS/LLM overlap enabled (parallel TTS generation)"
-            ;;
-        --trtllm)
-            export LLM_BACKEND="trtllm"
-            echo "✅ TensorRT-LLM backend enabled"
-            ;;
-    esac
-done
-
-# Launch server with SSL
+# Launch server
 # Use exec to replace shell process so signals (SIGTERM, SIGINT) go directly to uvicorn
-exec uvicorn server:app --host 0.0.0.0 --port "$PORT" \
-    --ssl-keyfile "$SSL_KEY" \
-    --ssl-certfile "$SSL_CERT"
+if [ "$SSL_ENABLED" = "true" ]; then
+    exec uvicorn server:app --host "$HOST" --port "$PORT" \
+        --ssl-keyfile "$SSL_KEY" \
+        --ssl-certfile "$SSL_CERT"
+else
+    exec uvicorn server:app --host "$HOST" --port "$PORT" \
+        --proxy-headers --forwarded-allow-ips="127.0.0.1"
+fi
 

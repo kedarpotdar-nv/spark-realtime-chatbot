@@ -177,7 +177,8 @@ COPY clients/ ./clients/
 COPY static/ ./static/
 COPY demo_files/ ./demo_files/
 COPY launch-https.sh .
-RUN chmod +x launch-https.sh
+COPY scripts/ ./scripts/
+RUN chmod +x launch-https.sh scripts/*.sh
 
 # Create required directories
 RUN mkdir -p audio_cache
@@ -189,7 +190,11 @@ RUN mkdir -p audio_cache
 # Allow pip to install system-wide (needed for any runtime downloads)
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
-ENV PORT=8443 \
+ENV HOST=0.0.0.0 \
+    PORT=8443 \
+    SSL_ENABLED=true \
+    SSL_KEY=key.pem \
+    SSL_CERT=cert.pem \
     # ASR Configuration (local mode for lower latency)
     ASR_MODE=local \
     ASR_MODEL=Systran/faster-distil-whisper-large-v3 \
@@ -214,9 +219,9 @@ ENV PORT=8443 \
 # Expose HTTPS port
 EXPOSE 8443
 
-# Health check
+# Health check (works for both HTTPS and plain HTTP when SSL_ENABLED=false)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -k -f https://localhost:${PORT}/health || exit 1
+    CMD if [ "$SSL_ENABLED" = "false" ]; then curl -f http://localhost:${PORT}/health; else curl -k -f https://localhost:${PORT}/health; fi || exit 1
 
 # Default command - start server with local ASR and TTS overlap
 CMD ["./launch-https.sh", "--local-asr", "--tts-overlap"]
