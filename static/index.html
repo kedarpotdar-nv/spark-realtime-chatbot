@@ -300,6 +300,7 @@
             />
             <select id="hermesCategorySelect" class="settings-select" style="width:92px;height:32px;padding:0 6px;font-size:11.5px;" aria-label="Task category">
               <option value="coding" selected>Coding</option>
+              <option value="creative">Creative</option>
               <option value="project">Project</option>
               <option value="research">Research</option>
               <option value="general">General</option>
@@ -396,6 +397,55 @@
           <textarea id="systemPromptInput" class="settings-textarea" rows="4" placeholder="System instructions..."></textarea>
         </div>
 
+        <!-- Personal filesystem tools (Jarvis local mode) -->
+        <div class="settings-group">
+          <div class="settings-label"><span>Personal Tools (DGX host)</span></div>
+          <div class="checkbox-grid">
+            <label class="checkbox-card">
+              <input type="checkbox" id="toolListDirectory" data-tool-checkbox value="list_directory" checked />
+              <div>
+                <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">List Directory</div>
+                <div style="font-size:11.5px;color:var(--text-muted);">Browse Downloads, home, and other allowed folders</div>
+              </div>
+            </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="toolReadFile" data-tool-checkbox value="read_file" checked />
+              <div>
+                <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">Read File</div>
+                <div style="font-size:11.5px;color:var(--text-muted);">Read text files on the Spark host</div>
+              </div>
+            </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="toolWriteFile" data-tool-checkbox value="write_file" checked />
+              <div>
+                <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">Write File</div>
+                <div style="font-size:11.5px;color:var(--text-muted);">Create or update files under allowed roots</div>
+              </div>
+            </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="toolSearchFiles" data-tool-checkbox value="search_files" checked />
+              <div>
+                <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">Search Files</div>
+                <div style="font-size:11.5px;color:var(--text-muted);">Find files and folders by name</div>
+              </div>
+            </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="toolRunCommand" data-tool-checkbox value="run_command" checked />
+              <div>
+                <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">Run Command</div>
+                <div style="font-size:11.5px;color:var(--text-muted);">Execute shell commands on the host (no sandbox)</div>
+              </div>
+            </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="toolOpenPath" data-tool-checkbox value="open_path" checked />
+              <div>
+                <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">Open Path</div>
+                <div style="font-size:11.5px;color:var(--text-muted);">Open or reveal files with the desktop opener</div>
+              </div>
+            </label>
+          </div>
+        </div>
+
         <!-- Enabled Agent Tools -->
         <div class="settings-group">
           <div class="settings-label"><span>Background Agents &amp; Tools</span></div>
@@ -404,7 +454,7 @@
               <input type="checkbox" id="agentHermesDelegate" data-tool-checkbox value="delegate_task" checked />
               <div>
                 <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">Hermes Agent Bridge</div>
-                <div style="font-size:11.5px;color:var(--text-muted);">Non-blocking coding, project &amp; research tasks (<code>delegate_task</code>)</div>
+                <div style="font-size:11.5px;color:var(--text-muted);">On-demand background coding, project &amp; research (<code>delegate_task</code>)</div>
               </div>
             </label>
             <label class="checkbox-card">

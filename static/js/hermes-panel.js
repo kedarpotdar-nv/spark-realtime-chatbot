@@ -216,9 +216,13 @@ function renderHermesPanel() {
             ${artifacts.length > 0 ? `
               <div class="hermes-task-artifacts">
                 ${artifacts.map((relPath) => `
-                  <button type="button" class="artifact-chip" onclick="previewWorkspaceArtifact('${escapeHtml(relPath)}')">
+                  <button type="button" class="artifact-chip" onclick="previewWorkspaceArtifact(${JSON.stringify(relPath)})" title="Preview">
                     ${window.SparkIcons.iconSvg('file-code', 12)}
                     <span>${escapeHtml(relPath)}</span>
+                  </button>
+                  <button type="button" class="artifact-chip" onclick="openWorkspacePath(${JSON.stringify(relPath)}, false); event.stopPropagation();" title="Open on desktop">
+                    ${window.SparkIcons.iconSvg('external-link', 12)}
+                    <span>Open</span>
                   </button>
                 `).join('')}
               </div>
@@ -241,17 +245,83 @@ function renderHermesPanel() {
         const kb = art.size < 1024 ? `${art.size} B` : `${(art.size / 1024).toFixed(1)} KB`;
         const isHtml = art.name.endsWith('.html') || art.name.endsWith('.htm');
         const iconName = isHtml ? 'globe' : (art.name.endsWith('.md') ? 'file-text' : 'file-code');
+        const pathEsc = escapeHtml(art.path);
+        const pathJs = JSON.stringify(art.path);
         return `
-          <div class="artifact-row" onclick="previewWorkspaceArtifact('${escapeHtml(art.path)}')">
-            <div class="artifact-row-main">
+          <div class="artifact-row">
+            <div class="artifact-row-main" onclick="previewWorkspaceArtifact(${pathJs})" style="cursor:pointer;min-width:0;flex:1;">
               <span style="color:var(--accent);display:inline-flex;">${window.SparkIcons.iconSvg(iconName, 14)}</span>
-              <span class="artifact-row-name">${escapeHtml(art.path)}</span>
+              <span class="artifact-row-name">${pathEsc}</span>
             </div>
             <span class="artifact-row-meta">${escapeHtml(kb)}</span>
+            <button type="button" class="icon-btn" onclick="event.stopPropagation(); openWorkspacePath(${pathJs}, false)" title="Open on desktop" aria-label="Open on desktop">
+              ${window.SparkIcons.iconSvg('external-link', 13)}
+            </button>
+            <button type="button" class="icon-btn" onclick="event.stopPropagation(); openWorkspacePath(${pathJs}, true)" title="Reveal in folder" aria-label="Reveal in folder">
+              ${window.SparkIcons.iconSvg('folder-open', 13)}
+            </button>
           </div>
         `;
       }).join('');
     }
+  }
+}
+
+async function openWorkspacePath(path, reveal = false) {
+  if (!path) return;
+  try {
+    const res = await fetch('/api/workspace/open', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, reveal: Boolean(reveal) })
+    });
+    const data = await res.json();
+    if (!data.success) {
+      addMessage('system', data.error || 'Failed to open path on host');
+      return;
+    }
+    log(`Opened on host: ${data.opened || data.path}`);
+  } catch (e) {
+    log(`Open path error: ${e.message}`);
+  }
+}
+
+async function previewPersonalFile(absPath) {
+  try {
+    const res = await fetch(`/api/personal/file?path=${encodeURIComponent(absPath)}`);
+    const data = await res.json();
+    if (!data.success || !data.file) {
+      addMessage('system', data.error || 'Failed to preview personal file');
+      return;
+    }
+    const file = data.file;
+    if (file.binary) {
+      await openWorkspacePath(file.path, false);
+      return;
+    }
+    if (file.extension === '.html' || file.extension === '.htm') {
+      openHtmlEditor(file.path);
+      htmlContent = file.content || '';
+      const editor = document.getElementById('agentHtmlEditor');
+      const preview = document.getElementById('agentHtmlPreview');
+      if (editor) editor.textContent = htmlContent;
+      if (preview) preview.srcdoc = htmlContent;
+    } else {
+      openMarkdownEditor(file.path);
+      markdownContent = file.content || '';
+      const editor = document.getElementById('agentMarkdownEditor');
+      const preview = document.getElementById('agentMarkdownPreview');
+      if (editor) editor.textContent = markdownContent;
+      if (preview) {
+        if (file.extension === '.md') {
+          preview.innerHTML = renderMarkdownPreview(markdownContent, 'agentMarkdownPreview');
+        } else {
+          preview.innerHTML = `<pre><code>${escapeHtml(markdownContent)}</code></pre>`;
+        }
+      }
+    }
+  } catch (e) {
+    log(`Personal file preview error: ${e.message}`);
   }
 }
 

@@ -127,3 +127,102 @@ AGENT_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
 # FFmpeg path
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip().lower() in ("true", "1", "yes", "on")
+
+
+def _default_personal_fs_roots() -> list[Path]:
+    """Default allowlisted roots for personal filesystem tools on DGX Spark."""
+    home = Path.home().resolve()
+    candidates = [
+        home,
+        home / "Downloads",
+        home / "Documents",
+        home / "Desktop",
+        home / "Projects",
+        AGENT_WORKSPACE_DIR,
+    ]
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(resolved)
+    return roots
+
+
+def _parse_personal_fs_roots() -> list[Path]:
+    """Parse PERSONAL_FS_ROOTS env (colon-separated) or fall back to defaults."""
+    raw = os.getenv("PERSONAL_FS_ROOTS", "").strip()
+    if not raw:
+        return _default_personal_fs_roots()
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for part in raw.split(":"):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            resolved = Path(part).expanduser().resolve()
+        except OSError:
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(resolved)
+    return roots or _default_personal_fs_roots()
+
+
+@dataclass
+class PersonalFSConfig:
+    """Personal filesystem / shell tools (Jarvis local mode, no Docker sandbox)."""
+    enabled: bool = field(default_factory=lambda: _env_bool("PERSONAL_FS_ENABLED", True))
+    shell_enabled: bool = field(default_factory=lambda: _env_bool("PERSONAL_SHELL_ENABLED", True))
+    shell_timeout: int = field(default_factory=lambda: int(os.getenv("PERSONAL_SHELL_TIMEOUT", "60")))
+    read_max_bytes: int = field(default_factory=lambda: int(os.getenv("PERSONAL_READ_MAX_BYTES", str(200 * 1024))))
+    list_max_entries: int = field(default_factory=lambda: int(os.getenv("PERSONAL_LIST_MAX_ENTRIES", "200")))
+    search_max_results: int = field(default_factory=lambda: int(os.getenv("PERSONAL_SEARCH_MAX_RESULTS", "50")))
+    command_max_output_bytes: int = field(
+        default_factory=lambda: int(os.getenv("PERSONAL_CMD_MAX_OUTPUT_BYTES", str(80 * 1024)))
+    )
+    roots: list[Path] = field(default_factory=_parse_personal_fs_roots)
+
+    def is_under_roots(self, path: Path) -> bool:
+        """Return True if path resolves under one of the allowlisted roots."""
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            return False
+        for root in self.roots:
+            try:
+                resolved.relative_to(root)
+                return True
+            except ValueError:
+                continue
+        return False
+
+    def resolve_allowed(self, path: str | Path) -> Path:
+        """Resolve a user path and raise ValueError if outside allowlisted roots."""
+        raw = Path(path).expanduser()
+        if not raw.is_absolute():
+            # Relative paths default under $HOME for natural Jarvis phrasing
+            raw = Path.home() / raw
+        try:
+            resolved = raw.resolve()
+        except OSError as exc:
+            raise ValueError(f"Cannot resolve path: {path}") from exc
+        if not self.is_under_roots(resolved):
+            raise ValueError(f"Path is outside allowed personal roots: {resolved}")
+        return resolved

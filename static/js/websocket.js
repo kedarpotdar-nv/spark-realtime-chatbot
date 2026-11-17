@@ -363,6 +363,18 @@ async function handleMessage(data) {
       }
       break;
 
+    case 'artifact_ready':
+      if (data.path) {
+        log(`Artifact ready: ${data.path}`);
+        switchAgentTab('artifacts');
+        renderHermesPanel();
+      }
+      break;
+
+    case 'path_opened':
+      log(`Host opened: ${data.opened || data.path || ''}`);
+      break;
+
     case 'final_response':
     case 'llm_final': {
       hideThinkingIndicator();

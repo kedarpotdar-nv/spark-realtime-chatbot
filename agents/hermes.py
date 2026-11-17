@@ -123,6 +123,21 @@ class HermesAgentBridge(AgentBridge):
         """Probe Hermes gateway / upstream to establish a warm persistent session."""
         await self.check_status(force_probe=True)
 
+    async def ensure_ready(self) -> Dict[str, Any]:
+        """Lazy-initialize Hermes on first use (delegate_task / REST).
+
+        Skips aggressive probing at server startup; probes only when a task is
+        actually delegated. Returns the status payload after probing.
+        """
+        status = await self.check_status(force_probe=True)
+        if not self.is_configured() and self._transport_mode == "unconfigured":
+            # Allow explicit HERMES_ENABLED=true to fall through to local_openai
+            raw = os.getenv("HERMES_ENABLED", "").strip().lower()
+            if raw in ("true", "1", "yes", "on"):
+                self._transport_mode = "local_openai"
+                status = self._build_status_payload(available=True, configured=True)
+        return status
+
     async def check_status(self, force_probe: bool = False) -> Dict[str, Any]:
         """Probe Hermes availability and return detailed status for the UI."""
         now = time.time()
@@ -253,6 +268,9 @@ class HermesAgentBridge(AgentBridge):
         on_event: Optional[EventCallback] = None,
     ) -> AgentTask:
         """Create and schedule a background Hermes task without blocking the caller."""
+        # Lazy probe / activate transport on first delegation
+        await self.ensure_ready()
+
         agent_task = AgentTask.create(
             agent_id=self.agent_id,
             task=task,

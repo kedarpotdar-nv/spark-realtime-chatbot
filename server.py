@@ -24,10 +24,11 @@ from starlette.websockets import WebSocketState
 # Local modules
 from config import (
     ASRConfig, LLMConfig, VLMConfig, NemotronConfig, TTSConfig, ServerConfig, HermesConfig,
+    PersonalFSConfig,
     AUDIO_DIR, STATIC_DIR, SAMPLE_RATE, WORKSPACE_ROOT, AGENT_WORKSPACE_DIR, FFMPEG_PATH
 )
 from audio import check_ffmpeg_available, decode_webm_bytes_to_pcm_f32
-from tools import get_enabled_tools, execute_tool
+from tools import get_enabled_tools, execute_tool, PERSONAL_TOOL_IDS, AGENT_TOOL_IDS
 from agents import get_hermes_bridge, AgentEvent
 from clients import (
     HTTPSessionManager,
@@ -36,6 +37,7 @@ from clients import (
     VLMClient,
     NemotronClient,
     KokoroTTS,
+    get_personal_fs,
 )
 from clients.http_session import set_http_manager
 
@@ -88,14 +90,33 @@ async def lifespan(app: FastAPI):
         print(f"[TTS] Initialization error (TTS may be unavailable): {e}")
         tts = None
 
-    # Initialize and warm up Hermes Agent bridge (non-blocking)
+    # Hermes Agent bridge: lazy by default — only probe/warmup when explicitly enabled
+    # or when HERMES_URL is set. Otherwise stays idle until first delegate_task.
     hermes_bridge = get_hermes_bridge()
-    try:
-        await hermes_bridge.warmup()
-        status = await hermes_bridge.check_status()
-        print(f"[Hermes] Bridge initialized (configured={status['configured']}, transport={status['transport']})")
-    except Exception as e:
-        print(f"[Hermes] Warmup notice: {e}")
+    hermes_cfg = HermesConfig()
+    explicit_hermes = (
+        os.getenv("HERMES_ENABLED", "").strip().lower() in ("true", "1", "yes", "on")
+        or bool(os.getenv("HERMES_URL", "").strip())
+        or bool(hermes_cfg.url)
+    )
+    if explicit_hermes:
+        try:
+            await hermes_bridge.warmup()
+            status = await hermes_bridge.check_status()
+            print(
+                f"[Hermes] Bridge warmed (configured={status['configured']}, "
+                f"transport={status['transport']})"
+            )
+        except Exception as e:
+            print(f"[Hermes] Warmup notice: {e}")
+    else:
+        print("[Hermes] Lazy mode — will probe on first delegate_task (set HERMES_URL or HERMES_ENABLED=true to warm at startup)")
+
+    personal_cfg = PersonalFSConfig()
+    print(
+        f"[PersonalFS] enabled={personal_cfg.enabled} shell={personal_cfg.shell_enabled} "
+        f"roots={len(personal_cfg.roots)}"
+    )
 
     yield
     # Cleanup: close shared HTTP session
@@ -223,6 +244,82 @@ async def read_workspace_file(path: str):
     if file_data is None:
         return {"success": False, "error": "Artifact not found"}
     return {"success": True, "file": file_data}
+
+
+@app.post("/api/workspace/open")
+async def open_workspace_or_personal_path(request: Request):
+    """Open or reveal a file/folder on the DGX Spark desktop (xdg-open).
+
+    Body: {"path": "...", "reveal": false}
+    Path may be a workspace-relative artifact or an absolute path under personal roots.
+    """
+    data = await request.json()
+    path = (data.get("path") or "").strip()
+    reveal = bool(data.get("reveal", False))
+    if not path:
+        return {"success": False, "error": "Path is required"}
+
+    fs = get_personal_fs()
+    bridge = get_hermes_bridge()
+
+    # Prefer resolving workspace-relative artifacts first
+    candidate = path
+    try:
+        from pathlib import Path as _Path
+        p = _Path(path)
+        if not p.is_absolute():
+            ws_candidate = (bridge.workspace_dir / path).resolve()
+            if ws_candidate.exists():
+                candidate = str(ws_candidate)
+    except Exception:
+        pass
+
+    result = fs.open_path(candidate, reveal=reveal)
+    return result
+
+
+@app.get("/api/personal/file")
+async def read_personal_file(path: str):
+    """Read a personal-root file for UI preview (root-gated, not sandboxed)."""
+    fs = get_personal_fs()
+    result = fs.read_file(path)
+    if not result.get("success"):
+        return {"success": False, "error": result.get("error", "Failed to read file")}
+    from pathlib import Path as _Path
+    target = _Path(result["path"])
+    return {
+        "success": True,
+        "file": {
+            "path": result["path"],
+            "name": target.name,
+            "extension": target.suffix.lower(),
+            "size": result.get("size"),
+            "mime_type": result.get("mime_type"),
+            "binary": result.get("binary", False),
+            "content": result.get("content", ""),
+            "truncated": result.get("truncated", False),
+        },
+    }
+
+
+@app.get("/api/personal/list")
+async def list_personal_directory(path: str = "~"):
+    """List a directory under personal filesystem roots."""
+    fs = get_personal_fs()
+    return fs.list_directory(path)
+
+
+@app.get("/api/personal/status")
+async def personal_fs_status():
+    """Return personal filesystem tool configuration for the UI."""
+    cfg = PersonalFSConfig()
+    return {
+        "enabled": cfg.enabled,
+        "shell_enabled": cfg.shell_enabled,
+        "roots": [str(r) for r in cfg.roots],
+        "shell_timeout": cfg.shell_timeout,
+        "read_max_bytes": cfg.read_max_bytes,
+    }
 
 
 # -----------------------------
@@ -804,11 +901,17 @@ class VoiceSession:
                             
                             # Determine feedback message based on tool type
                             is_agent_tool = False
+                            is_personal_tool = False
                             for tc in tool_calls:
                                 func = tc.get("function", {})
-                                if func.get("name") in ["delegate_task", "hermes_agent", "markdown_assistant", "html_assistant", "reasoning_assistant"]:
+                                fn_name = func.get("name", "")
+                                if fn_name in AGENT_TOOL_IDS or fn_name in (
+                                    "delegate_task", "hermes_agent", "markdown_assistant",
+                                    "html_assistant", "reasoning_assistant",
+                                ):
                                     is_agent_tool = True
-                                    break
+                                if fn_name in PERSONAL_TOOL_IDS:
+                                    is_personal_tool = True
 
                             if is_agent_tool:
                                 for tc in tool_calls:
@@ -817,10 +920,27 @@ class VoiceSession:
                                         feedback_msg = "Let me think through this."
                                         break
                                     elif fn_name in ("delegate_task", "hermes_agent"):
-                                        feedback_msg = "Sure, working on it in the background."
+                                        # Cue creative handoffs (image/music) with a clearer ack
+                                        try:
+                                            args = json.loads(tc.get("function", {}).get("arguments") or "{}")
+                                        except json.JSONDecodeError:
+                                            args = {}
+                                        category = str(args.get("category") or "").lower()
+                                        task_l = str(args.get("task") or "").lower()
+                                        creative_hints = (
+                                            "image", "logo", "poster", "illustration", "artwork",
+                                            "draw", "picture", "photo", "music", "song", "soundtrack",
+                                            "audio", "sound",
+                                        )
+                                        if category == "creative" or any(h in task_l for h in creative_hints):
+                                            feedback_msg = "Got it — sending that to Hermes to generate."
+                                        else:
+                                            feedback_msg = "Sure, working on it in the background."
                                         break
                                 else:
                                     feedback_msg = "On it."
+                            elif is_personal_tool:
+                                feedback_msg = "Checking that for you."
                             else:
                                 feedback_msg = "Looking that up for you."
 
@@ -856,7 +976,8 @@ class VoiceSession:
                                 tool_result = await execute_tool(tool_name, arguments)
                                 print(f"[Voice Session] Tool '{tool_name}' returned: {tool_result[:100]}...")
 
-                                # Check if this is an agent tool that needs special handling
+                                # Prefer LLM-friendly summary for personal tools; keep raw for agents
+                                tool_content_for_llm = tool_result
                                 try:
                                     tool_result_data = json.loads(tool_result)
                                     if tool_result_data.get("agent_type"):
@@ -867,6 +988,11 @@ class VoiceSession:
                                             "codebase_path": tool_result_data.get("codebase_path", "")
                                         })
                                         print(f"[Voice Session] Agent '{tool_result_data.get('agent_type')}' started - UI should open")
+                                    if tool_name in PERSONAL_TOOL_IDS:
+                                        tool_content_for_llm = tool_result_data.get("summary") or tool_result
+                                        # Notify UI when a path was opened
+                                        if tool_name == "open_path" and tool_result_data.get("result", {}).get("success"):
+                                            await self.send_message("path_opened", tool_result_data.get("result", {}))
                                 except json.JSONDecodeError:
                                     pass
 
@@ -874,7 +1000,7 @@ class VoiceSession:
                                     "tool_call_id": tool_id,
                                     "role": "tool",
                                     "name": tool_name,
-                                    "content": tool_result
+                                    "content": tool_content_for_llm
                                 })
 
                             # Add tool results to conversation history (after assistant message with tool_calls)
@@ -903,7 +1029,19 @@ class VoiceSession:
 
                             # Background Hermes delegation: dispatch immediately without blocking voice loop
                             if is_agent_tool and agent_type == "hermes_agent":
-                                ack_text = "Sure, working on that in the background with Hermes."
+                                cat_l = str(agent_category or "").lower()
+                                task_l = str(agent_task or "").lower()
+                                creative_hints = (
+                                    "image", "logo", "poster", "illustration", "artwork",
+                                    "draw", "picture", "photo", "music", "song", "soundtrack",
+                                    "audio", "sound",
+                                )
+                                if cat_l == "creative" or any(h in task_l for h in creative_hints):
+                                    if cat_l != "creative":
+                                        agent_category = "creative"
+                                    ack_text = "On it — Hermes is generating that in the background."
+                                else:
+                                    ack_text = "Sure, working on that in the background with Hermes."
                                 self.conversation_history.append({"role": "assistant", "content": ack_text})
                                 await self.send_message("final_response", {"text": ack_text})
                                 await self.delegate_to_hermes(
@@ -1388,6 +1526,12 @@ Output the complete HTML code."""
     ):
         """Dispatch a background task to Hermes Agent and stream events over WebSocket."""
         bridge = get_hermes_bridge()
+        # Lazy probe on first use
+        try:
+            await bridge.ensure_ready()
+        except Exception as e:
+            print(f"[Hermes] ensure_ready notice: {e}")
+
         if not bridge.is_configured():
             err_text = "Hermes Agent is not configured on this server. Set HERMES_URL or HERMES_ENABLED=true."
             await self.send_message("error", {"error": err_text})
@@ -1416,9 +1560,16 @@ Output the complete HTML code."""
 
         if evt.event_type == "artifact.created":
             bridge = get_hermes_bridge()
+            artifact_rel = evt.data.get("artifact") or ""
             await self.send_message("workspace_updated", {
                 "artifacts": [a.to_dict() for a in bridge.list_artifacts()[:50]],
             })
+            # Notify UI that a new artifact is ready to open/preview
+            if artifact_rel:
+                await self.send_message("artifact_ready", {
+                    "path": artifact_rel,
+                    "task_id": evt.task_id,
+                })
 
         elif evt.event_type == "task.completed":
             task_dict = evt.data.get("task") or {}
@@ -1874,13 +2025,24 @@ async def voice_call(websocket: WebSocket):
 
                                             # Execute tool
                                             if tool_name in ("delegate_task", "hermes_agent"):
-                                                ack = "Sure, working on that in the background."
+                                                cat = str(args.get("category") or "general").lower()
+                                                task_l = str(args.get("task") or "").lower()
+                                                creative_hints = (
+                                                    "image", "logo", "poster", "illustration", "artwork",
+                                                    "draw", "picture", "photo", "music", "song", "soundtrack",
+                                                    "audio", "sound",
+                                                )
+                                                if cat == "creative" or any(h in task_l for h in creative_hints):
+                                                    cat = "creative"
+                                                    ack = "Got it — Hermes is generating that now."
+                                                else:
+                                                    ack = "Sure, working on that in the background."
                                                 await session.send_message("llm_final", {"text": ack})
                                                 await session.stream_tts(ack, is_transient=True)
                                                 await session.delegate_to_hermes(
                                                     task=args.get("task", ""),
                                                     context=args.get("context", ""),
-                                                    category=args.get("category", "general"),
+                                                    category=cat,
                                                     speak_ack=False,
                                                 )
                                             elif tool_name == "markdown_assistant":
@@ -1896,6 +2058,46 @@ async def voice_call(websocket: WebSocket):
                                                     args.get("context", ""),
                                                     args.get("analysis_type", "general")
                                                 )
+                                            elif tool_name in PERSONAL_TOOL_IDS:
+                                                await session.stream_tts("Checking that for you.", is_transient=True)
+                                                tool_raw = await execute_tool(tool_name, args)
+                                                try:
+                                                    tool_data = json.loads(tool_raw)
+                                                    summary = tool_data.get("summary") or tool_raw
+                                                    if (
+                                                        tool_name == "open_path"
+                                                        and tool_data.get("result", {}).get("success")
+                                                    ):
+                                                        await session.send_message(
+                                                            "path_opened", tool_data.get("result", {})
+                                                        )
+                                                except json.JSONDecodeError:
+                                                    summary = tool_raw
+                                                # Ask LLM for a short spoken answer from the tool result
+                                                session.conversation_history.append({
+                                                    "role": "assistant",
+                                                    "content": None,
+                                                    "tool_calls": [tool_call],
+                                                })
+                                                session.conversation_history.append({
+                                                    "role": "tool",
+                                                    "tool_call_id": tool_call.get("id", ""),
+                                                    "name": tool_name,
+                                                    "content": summary,
+                                                })
+                                                spoken = ""
+                                                async for chunk in llm.stream_complete(list(session.conversation_history), tools=None):
+                                                    if chunk.startswith("data: "):
+                                                        try:
+                                                            pdata = json.loads(chunk[6:])
+                                                            if pdata.get("content"):
+                                                                spoken += pdata["content"]
+                                                        except json.JSONDecodeError:
+                                                            pass
+                                                spoken = (spoken or "Done.").strip()
+                                                session.conversation_history.append({"role": "assistant", "content": spoken})
+                                                await session.send_message("llm_final", {"text": spoken})
+                                                await session.stream_tts(spoken)
                                     else:
                                         # Regular response - speak it
                                         if response_text:

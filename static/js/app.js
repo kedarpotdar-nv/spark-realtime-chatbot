@@ -30,7 +30,7 @@ function renderEmptyState(mode = 'chat') {
     chat: {
       icon: 'message-square',
       title: 'Ready on DGX Spark',
-      hint: 'Hold Space or the microphone button to speak, type a prompt below, or delegate background coding and research tasks to Hermes Agent.'
+      hint: 'Hold Space or the mic to speak. Ask about Downloads or files on this Spark, or hand off heavy work to Hermes in the background.'
     },
     call: {
       icon: 'phone',

@@ -39,11 +39,19 @@ export SSL_ENABLED="${SSL_ENABLED:-true}"
 export SSL_KEY="${SSL_KEY:-${SSL_KEYFILE:-key.pem}}"
 export SSL_CERT="${SSL_CERT:-${SSL_CERTFILE:-cert.pem}}"
 
-# Hermes Agent (Nous Research) configuration (optional; degrades gracefully when unset)
+# Hermes Agent (Nous Research) — lazy by default; set HERMES_URL or HERMES_ENABLED=true to warm at startup
 export HERMES_URL="${HERMES_URL:-}"
 export HERMES_MODEL="${HERMES_MODEL:-hermes-agent}"
 export HERMES_TIMEOUT="${HERMES_TIMEOUT:-600}"
 export HERMES_MAX_CONCURRENT="${HERMES_MAX_CONCURRENT:-4}"
+
+# Personal filesystem / shell tools (Jarvis local mode on DGX host, no Docker sandbox)
+export PERSONAL_FS_ENABLED="${PERSONAL_FS_ENABLED:-true}"
+export PERSONAL_SHELL_ENABLED="${PERSONAL_SHELL_ENABLED:-true}"
+export PERSONAL_SHELL_TIMEOUT="${PERSONAL_SHELL_TIMEOUT:-60}"
+export PERSONAL_READ_MAX_BYTES="${PERSONAL_READ_MAX_BYTES:-204800}"
+# Optional colon-separated allowlist; default is $HOME + Downloads/Documents/Desktop/Projects + workspace
+# export PERSONAL_FS_ROOTS="${PERSONAL_FS_ROOTS:-}"
 
 # Parse command line flags
 while [[ $# -gt 0 ]]; do
