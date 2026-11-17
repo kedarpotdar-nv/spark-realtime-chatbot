@@ -156,6 +156,45 @@ function connectVoiceWebSocket() {
   };
 }
 
+function chatNeedsGreeting(chatId) {
+  const chat = chats[chatId];
+  if (!chat) return false;
+  if (chat.greeted) return false;
+  return !(Array.isArray(chat.messages) && chat.messages.length > 0);
+}
+
+function resetServerConversation() {
+  if (voiceWs && voiceWs.readyState === WebSocket.OPEN) {
+    voiceWs.send(JSON.stringify({ type: 'reset' }));
+  }
+}
+
+function markSessionGreeted(chatId) {
+  if (!chatId || !chats[chatId]) return;
+  chats[chatId].greeted = true;
+  saveChatsToStorage();
+}
+
+function requestSessionGreetingIfNeeded() {
+  if (!currentChatId || !chatNeedsGreeting(currentChatId)) return;
+  if (!voiceWs || voiceWs.readyState !== WebSocket.OPEN) return;
+  pendingSessionGreeting = true;
+  trySendSessionGreeting();
+}
+
+async function trySendSessionGreeting() {
+  if (!pendingSessionGreeting || !currentChatId) return;
+  if (!chatNeedsGreeting(currentChatId)) {
+    pendingSessionGreeting = false;
+    return;
+  }
+  if (!voiceWs || voiceWs.readyState !== WebSocket.OPEN) return;
+  await initializeAudioContext();
+  if (audioContext && audioContext.state === 'suspended') return;
+  pendingSessionGreeting = false;
+  voiceWs.send(JSON.stringify({ type: 'session_greeting', session_id: currentChatId }));
+}
+
 function syncToolsToServer() {
   const checkboxes = document.querySelectorAll('input[data-tool-checkbox]');
   const enabledTools = [];
@@ -172,6 +211,7 @@ async function handleMessage(data) {
   switch (data.type) {
     case 'connected':
       initializeAudioOnConnection();
+      requestSessionGreetingIfNeeded();
       if (data.hermes) hermesStatus = data.hermes;
       if (Array.isArray(data.tasks)) {
         data.tasks.forEach((t) => { hermesTasks[t.task_id] = t; });
@@ -460,6 +500,14 @@ async function handleMessage(data) {
     case 'tools_changed':
     case 'reset_ack':
     case 'disconnect_ack':
+      break;
+
+    case 'session_greeting_done':
+      if (data.session_id) {
+        markSessionGreeted(data.session_id);
+      } else if (currentChatId) {
+        markSessionGreeted(currentChatId);
+      }
       break;
 
     case 'error':

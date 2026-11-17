@@ -535,6 +535,9 @@ class VoiceSession:
         self.latest_camera_frame_b64: Optional[str] = None
         self.last_generated_image_path: Optional[str] = None
         self._comfy_tasks: Dict[str, asyncio.Task] = {}
+        self.client_session_id: Optional[str] = None
+        self.greeting_sent_for_session: Optional[str] = None
+        self._greeting_in_progress = False
         # Initialize conversation history AFTER system_prompt is defined
         self.conversation_history: List[Dict[str, str]] = [
             {
@@ -727,6 +730,50 @@ class VoiceSession:
                 await self.stream_tts(sentence.strip(), is_transient=False)
 
         print(f"[Voice Session] TTS completed ({len(sentences)} sentences)")
+
+    async def send_session_greeting(self) -> None:
+        """One-shot spoken greeting via LLM+TTS (not stored in conversation history)."""
+        if self._greeting_in_progress:
+            return
+        self._greeting_in_progress = True
+        try:
+            if llm is None:
+                print("[Voice Session] Cannot greet: LLM not initialized")
+                return
+            greet_trigger = {
+                "role": "user",
+                "content": (
+                    "The user just started a new voice session. "
+                    "Reply with one brief, friendly spoken greeting (one or two short sentences). "
+                    "Do not use tools, lists, or markdown."
+                ),
+            }
+            messages = list(self.conversation_history) + [greet_trigger]
+            assistant_text = await llm.complete(messages)
+            if not assistant_text or not str(assistant_text).strip():
+                print("[Voice Session] Session greeting: empty LLM response")
+                return
+            final_response = llm._extract_final_channel(str(assistant_text))
+            final_response = final_response.replace("<|channel|>analysis<|message|>", "")
+            final_response = final_response.replace("<|channel|>final<|message|>", "")
+            final_response = final_response.replace("<|end|>", "")
+            final_response = final_response.replace("<|start|>assistant", "")
+            final_response = final_response.strip()
+            if not final_response:
+                print("[Voice Session] Session greeting: empty after cleanup")
+                return
+            print(f"[Voice Session] Session greeting: {final_response[:80]}...")
+            await self.send_final_response(final_response)
+            await self.send_message(
+                "session_greeting_done",
+                {"session_id": self.client_session_id or ""},
+            )
+        except Exception as exc:
+            print(f"[Voice Session] Session greeting error: {exc}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            self._greeting_in_progress = False
 
     async def stream_tts(self, text: str, is_transient: bool = False, voice: str = None):
         """Stream TTS audio chunks."""
@@ -1858,21 +1905,6 @@ async def voice_call(websocket: WebSocket):
         })
         bridge.schedule_memory_refresh(session.hermes_identity)
         asyncio.create_task(session.refresh_hermes_memory_prompt())
-        # Wait a moment for frontend to send initial voice selection
-        await asyncio.sleep(0.2)
-        # Send a short greeting (don't add to conversation history)
-        import random
-        greetings = [
-            "Hey! What's up?",
-            "Hi there!",
-            "Hey, I'm Spark!",
-            "What can I help with?",
-            "Hi! Ready when you are.",
-        ]
-        greeting = random.choice(greetings)
-        print(f"[Voice Call] Sending greeting with voice: {session.selected_voice}")
-        await session.send_message("final_response", {"text": greeting})
-        await session.stream_tts(greeting, is_transient=False, voice=session.selected_voice)
     except Exception as e:
         print(f"[Voice Call] Error sending initial message: {e}")
         import traceback
@@ -1965,7 +1997,22 @@ async def voice_call(websocket: WebSocket):
                                 "content": session.system_prompt,
                             }
                         ]
+                        session.greeting_sent_for_session = None
                         await session.send_message("reset_ack")
+
+                    elif msg_type == "session_greeting":
+                        session_id = (data.get("session_id") or "").strip()
+                        if not session_id:
+                            await session.send_message("error", {"error": "No session_id for greeting"})
+                        elif session.greeting_sent_for_session == session_id:
+                            await session.send_message(
+                                "session_greeting_done",
+                                {"session_id": session_id, "skipped": True},
+                            )
+                        else:
+                            session.client_session_id = session_id
+                            session.greeting_sent_for_session = session_id
+                            asyncio.create_task(session.send_session_greeting())
                     
                     elif msg_type == "set_voice":
                         # Change TTS voice
