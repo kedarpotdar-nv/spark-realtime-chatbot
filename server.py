@@ -434,6 +434,10 @@ class VoiceSession:
         # Import system prompt from prompts.py
         from prompts import DEFAULT_SYSTEM_PROMPT
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
+        self._system_prompt_base = self.system_prompt
+        self.hermes_identity = os.getenv("SPARK_USER_ID", "default").strip() or "default"
+        self.camera_active = False
+        self.latest_camera_frame_b64: Optional[str] = None
         # Initialize conversation history AFTER system_prompt is defined
         self.conversation_history: List[Dict[str, str]] = [
             {
@@ -441,6 +445,20 @@ class VoiceSession:
                 "content": self.system_prompt,
             }
         ]
+
+    async def refresh_hermes_memory_prompt(self) -> None:
+        """Inject cached Hermes memory into the local model system prompt (non-blocking)."""
+        bridge = get_hermes_bridge()
+        if not bridge.is_configured():
+            return
+        try:
+            block = await bridge.get_memory_context(self.hermes_identity)
+            merged = bridge.merge_memory_into_system_prompt(self._system_prompt_base, block)
+            self.system_prompt = merged
+            if self.conversation_history and self.conversation_history[0].get("role") == "system":
+                self.conversation_history[0]["content"] = merged
+        except Exception as exc:
+            print(f"[Voice Session] Hermes memory inject skipped: {exc}")
 
     async def send_message(self, msg_type: str, data: Dict[str, Any] = None):
         """Send a JSON message to the client."""
@@ -1014,6 +1032,7 @@ class VoiceSession:
                             agent_task = None
                             agent_context = ""
                             agent_category = "general"
+                            agent_include_camera = True
                             for tool_result in tool_results:
                                 try:
                                     result_data = json.loads(tool_result.get("content", "{}"))
@@ -1023,6 +1042,8 @@ class VoiceSession:
                                         agent_task = result_data.get("task", "")
                                         agent_context = result_data.get("context", "")
                                         agent_category = result_data.get("category", "general")
+                                        if "include_camera" in result_data:
+                                            agent_include_camera = bool(result_data.get("include_camera"))
                                         break
                                 except json.JSONDecodeError:
                                     pass
@@ -1049,6 +1070,7 @@ class VoiceSession:
                                     context=agent_context,
                                     category=agent_category,
                                     speak_ack=False,
+                                    include_camera=agent_include_camera,
                                 )
                                 return
 
@@ -1523,6 +1545,7 @@ Output the complete HTML code."""
         context: str = "",
         category: str = "general",
         speak_ack: bool = False,
+        include_camera: bool = True,
     ):
         """Dispatch a background task to Hermes Agent and stream events over WebSocket."""
         bridge = get_hermes_bridge()
@@ -1545,10 +1568,16 @@ Output the complete HTML code."""
         async def on_event(evt: AgentEvent):
             await self.handle_hermes_event(evt)
 
+        image_b64 = None
+        if include_camera and self.camera_active and self.latest_camera_frame_b64:
+            image_b64 = self.latest_camera_frame_b64
+
         agent_task = await bridge.submit_task(
             task=task,
             context=context,
             category=category,
+            identity=self.hermes_identity,
+            image_b64=image_b64,
             on_event=on_event,
         )
         return agent_task
@@ -1589,6 +1618,7 @@ Output the complete HTML code."""
                     "task": task_dict,
                 })
                 await self.stream_tts(spoken_summary, is_transient=False)
+            asyncio.create_task(self.refresh_hermes_memory_prompt())
 
         elif evt.event_type == "task.failed":
             spoken_summary = evt.data.get("spoken_summary") or "Hermes encountered an error on the background task."
@@ -1644,6 +1674,8 @@ async def voice_call(websocket: WebSocket):
             "tasks": [t.to_dict() for t in bridge.list_tasks()[:25]],
             "artifacts": [a.to_dict() for a in bridge.list_artifacts()[:50]],
         })
+        bridge.schedule_memory_refresh(session.hermes_identity)
+        asyncio.create_task(session.refresh_hermes_memory_prompt())
         # Wait a moment for frontend to send initial voice selection
         await asyncio.sleep(0.2)
         # Send a short greeting (don't add to conversation history)
@@ -1766,12 +1798,14 @@ async def voice_call(websocket: WebSocket):
                         # Change system prompt
                         prompt = data.get("prompt")
                         if prompt:
+                            session._system_prompt_base = prompt
                             session.system_prompt = prompt
                             # Update the system message in conversation history
                             if session.conversation_history and session.conversation_history[0].get("role") == "system":
                                 session.conversation_history[0]["content"] = prompt
                             else:
                                 session.conversation_history.insert(0, {"role": "system", "content": prompt})
+                            asyncio.create_task(session.refresh_hermes_memory_prompt())
                             print(f"[Voice Session] System prompt changed")
                             await session.send_message("system_prompt_changed", {"prompt": prompt})
                             # Also send the updated prompt so UI can sync
@@ -1866,9 +1900,18 @@ async def voice_call(websocket: WebSocket):
                             traceback.print_exc()
                             await session.send_message("error", {"error": str(e)})
                     
+                    elif msg_type == "set_hermes_identity":
+                        ident = (data.get("identity") or "").strip()
+                        if ident:
+                            session.hermes_identity = ident[:128]
+                            bridge = get_hermes_bridge()
+                            bridge.schedule_memory_refresh(session.hermes_identity)
+                            asyncio.create_task(session.refresh_hermes_memory_prompt())
+
                     elif msg_type == "video_call_data":
                         # Video call: audio + image from VAD/PTT
                         print("[Video Call] Received video_call_data")
+                        session.camera_active = True
                         audio_b64 = data.get("audio")
                         image_b64 = data.get("image")
                         audio_format = data.get("format", "wav")
@@ -1935,6 +1978,7 @@ async def voice_call(websocket: WebSocket):
                             
                             # Build VLM request with image if available
                             if image_b64:
+                                session.latest_camera_frame_b64 = image_b64
                                 print(f"[Video Call] Image: {len(image_b64)} chars base64")
 
                                 # Face recognition - recognize people in frame
@@ -1981,6 +2025,10 @@ async def voice_call(websocket: WebSocket):
                                 # Add face context to system prompt if we recognized anyone
                                 if face_context:
                                     system_prompt = f"{system_prompt}\n\nCURRENT SCENE: {face_context}"
+
+                                bridge = get_hermes_bridge()
+                                memory_block = await bridge.get_memory_context(session.hermes_identity)
+                                system_prompt = bridge.merge_memory_into_system_prompt(system_prompt, memory_block)
 
                                 # Get recent conversation history (last 10 messages, excluding current)
                                 # This gives VLM context of recent conversation
@@ -2039,11 +2087,13 @@ async def voice_call(websocket: WebSocket):
                                                     ack = "Sure, working on that in the background."
                                                 await session.send_message("llm_final", {"text": ack})
                                                 await session.stream_tts(ack, is_transient=True)
+                                                include_cam = args.get("include_camera", True)
                                                 await session.delegate_to_hermes(
                                                     task=args.get("task", ""),
                                                     context=args.get("context", ""),
                                                     category=cat,
                                                     speak_ack=False,
+                                                    include_camera=bool(include_cam),
                                                 )
                                             elif tool_name == "markdown_assistant":
                                                 await session.stream_tts("On it.", is_transient=True)

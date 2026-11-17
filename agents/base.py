@@ -79,6 +79,8 @@ class AgentTask:
     finished_at: Optional[float] = None
     remote_run_id: Optional[str] = None
     session_id: Optional[str] = None
+    hermes_identity: str = "default"
+    image_b64: Optional[str] = None
     output: str = ""
     spoken_summary: str = ""
     error: Optional[str] = None

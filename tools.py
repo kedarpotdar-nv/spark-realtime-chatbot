@@ -42,6 +42,13 @@ ALL_TOOLS = {
                             "Use 'creative' for image/music/media generation. "
                             "Use coding/project/research for those domains; otherwise general."
                         )
+                    },
+                    "include_camera": {
+                        "type": "boolean",
+                        "description": (
+                            "When true (default during an active video call), attach the latest "
+                            "camera frame so Hermes can see the scene."
+                        )
                     }
                 },
                 "required": ["task"]
@@ -313,12 +320,14 @@ async def execute_tool(tool_name: str, arguments: Dict[str, Any]) -> str:
         task = arguments.get("task", "")
         context = arguments.get("context", "")
         category = arguments.get("category", "general")
+        include_camera = arguments.get("include_camera", True)
         return json.dumps({
             "agent_type": "hermes_agent",
             "tool": "delegate_task",
             "task": task,
             "context": context,
             "category": category,
+            "include_camera": include_camera,
             "status": "dispatched"
         })
 

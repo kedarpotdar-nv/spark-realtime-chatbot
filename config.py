@@ -106,6 +106,20 @@ class HermesConfig:
             str(Path(os.getenv("WORKSPACE_ROOT", Path.cwd())).resolve() / "workspace"),
         )
     )
+    session_store: str = field(
+        default_factory=lambda: os.getenv(
+            "HERMES_SESSION_STORE",
+            str(
+                Path(os.getenv("HERMES_WORKSPACE", Path.cwd() / "workspace")).resolve()
+                / ".hermes_sessions.json"
+            ),
+        )
+    )
+    session_key: str = field(default_factory=lambda: os.getenv("HERMES_SESSION_KEY", "").strip())
+    memory_ttl: int = field(default_factory=lambda: int(os.getenv("HERMES_MEMORY_TTL", "600")))
+    memory_fetch_timeout: float = field(
+        default_factory=lambda: float(os.getenv("HERMES_MEMORY_FETCH_TIMEOUT", "8"))
+    )
 
 
 # Directory paths

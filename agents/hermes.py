@@ -36,6 +36,7 @@ import aiohttp
 
 from clients.http_session import get_http_manager
 from config import AGENT_WORKSPACE_DIR, HermesConfig
+from .hermes_sessions import HermesSessionIdentity, get_hermes_session_store
 from .base import (
     AgentBridge,
     AgentEvent,
@@ -76,7 +77,13 @@ class HermesAgentBridge(AgentBridge):
         self._capabilities: Dict[str, Any] = {}
         self._transport_mode: str = "unconfigured"  # "gateway_runs", "gateway_chat", "cli", "local_openai", "unconfigured"
         self._last_probe_at: float = 0.0
-        self._warm_session_id: str = f"spark_{uuid.uuid4().hex[:10]}"
+        self._session_store = get_hermes_session_store()
+        self._api_sessions_ready: Set[str] = set()
+        self._memory_cache: Dict[str, str] = {}
+        self._memory_cached_at: Dict[str, float] = {}
+        self._memory_refresh_tasks: Dict[str, asyncio.Task] = {}
+        self._recent_task_summaries: List[str] = []
+        self._memory_section_marker = "## Long-term memory (from Hermes)"
 
     # ------------------------------------------------------------------
     # Configuration & Capability Discovery
@@ -109,19 +116,79 @@ class HermesAgentBridge(AgentBridge):
             url = url[: -len("/v1")]
         return url
 
-    def _headers(self, session_key: Optional[str] = None) -> Dict[str, str]:
+    def _resolve_identity(self, identity: str = "default") -> HermesSessionIdentity:
+        return self._session_store.get_identity(identity or "default")
+
+    def _headers(
+        self,
+        identity: str = "default",
+        *,
+        session_id: Optional[str] = None,
+        session_key: Optional[str] = None,
+    ) -> Dict[str, str]:
+        resolved = self._resolve_identity(identity)
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
-            "X-Hermes-Session-Key": session_key or self._warm_session_id,
+            "X-Hermes-Session-Id": session_id or resolved.hermes_session_id,
+            "X-Hermes-Session-Key": session_key or resolved.session_key,
         }
         if self.cfg.api_key:
             headers["Authorization"] = f"Bearer {self.cfg.api_key}"
         return headers
 
+    def _headers_for_task(self, agent_task: AgentTask) -> Dict[str, str]:
+        identity = agent_task.hermes_identity or "default"
+        return self._headers(
+            identity,
+            session_id=agent_task.session_id,
+        )
+
+    async def ensure_hermes_api_session(self, identity: str = "default") -> HermesSessionIdentity:
+        """Create or reaffirm durable Hermes gateway session via POST /api/sessions (404 = skip)."""
+        ident = (identity or "default").strip() or "default"
+        resolved = self._resolve_identity(ident)
+        if ident in self._api_sessions_ready:
+            return resolved
+
+        if self._transport_mode not in ("gateway_runs", "gateway_chat"):
+            return resolved
+
+        session = await get_http_manager().get_session()
+        base = self._base_url()
+        payload = {
+            "session_id": resolved.hermes_session_id,
+            "session_key": resolved.session_key,
+        }
+        try:
+            async with session.post(
+                f"{base}/api/sessions",
+                headers=self._headers(ident),
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=6.0),
+            ) as resp:
+                if resp.status in (200, 201):
+                    data = await resp.json()
+                    new_id = data.get("id") or data.get("session_id")
+                    if new_id:
+                        self._session_store.set_hermes_session_id(ident, str(new_id))
+                        resolved = self._resolve_identity(ident)
+                elif resp.status != 404:
+                    text = await resp.text()
+                    print(f"[Hermes] POST /api/sessions returned {resp.status}: {text[:120]}")
+        except Exception as exc:
+            print(f"[Hermes] ensure_hermes_api_session warning: {exc}")
+
+        self._api_sessions_ready.add(ident)
+        return resolved
+
     async def warmup(self) -> None:
         """Probe Hermes gateway / upstream to establish a warm persistent session."""
         await self.check_status(force_probe=True)
+        try:
+            await self.ensure_hermes_api_session("default")
+        except Exception as exc:
+            print(f"[Hermes] warmup session notice: {exc}")
 
     async def ensure_ready(self) -> Dict[str, Any]:
         """Lazy-initialize Hermes on first use (delegate_task / REST).
@@ -264,12 +331,16 @@ class HermesAgentBridge(AgentBridge):
         task: str,
         context: str = "",
         category: str = "general",
+        identity: str = "default",
+        image_b64: Optional[str] = None,
         session_key: Optional[str] = None,
         on_event: Optional[EventCallback] = None,
     ) -> AgentTask:
         """Create and schedule a background Hermes task without blocking the caller."""
         # Lazy probe / activate transport on first delegation
         await self.ensure_ready()
+        ident = (identity or "default").strip() or "default"
+        session_identity = await self.ensure_hermes_api_session(ident)
 
         agent_task = AgentTask.create(
             agent_id=self.agent_id,
@@ -278,7 +349,12 @@ class HermesAgentBridge(AgentBridge):
             category=category,
             workspace_dir=str(self.workspace_dir),
         )
-        agent_task.session_id = session_key or self._warm_session_id
+        agent_task.hermes_identity = ident
+        agent_task.session_id = session_identity.hermes_session_id
+        if image_b64:
+            agent_task.image_b64 = image_b64.strip()
+        if session_key:
+            self._session_store.set_session_key(ident, session_key)
         self._tasks[agent_task.task_id] = agent_task
 
         bg_task = asyncio.create_task(
@@ -306,7 +382,7 @@ class HermesAgentBridge(AgentBridge):
                 base = self._base_url()
                 await session.post(
                     f"{base}/v1/runs/{agent_task.remote_run_id}/stop",
-                    headers=self._headers(agent_task.session_id),
+                    headers=self._headers_for_task(agent_task),
                     timeout=aiohttp.ClientTimeout(total=5.0),
                 )
             except Exception as e:
@@ -416,6 +492,8 @@ class HermesAgentBridge(AgentBridge):
                 agent_task.status = TaskStatus.COMPLETED
                 agent_task.finished_at = time.time()
                 agent_task.spoken_summary = self.build_spoken_summary(agent_task)
+                self._record_task_summary(agent_task.spoken_summary)
+                self.invalidate_memory_cache(agent_task.hermes_identity)
 
                 await self._emit(
                     on_event,
@@ -469,7 +547,21 @@ class HermesAgentBridge(AgentBridge):
         on_event: Optional[EventCallback] = None,
     ) -> None:
         """Route execution to the active Hermes transport."""
-        if self._transport_mode == "gateway_runs":
+        has_image = bool((agent_task.image_b64 or "").strip())
+
+        if has_image and self._transport_mode in ("gateway_runs", "gateway_chat"):
+            try:
+                await self._run_via_chat_completions(
+                    agent_task,
+                    endpoint_url=f"{self._base_url()}/v1/chat/completions",
+                    on_event=on_event,
+                    attach_camera=True,
+                )
+                return
+            except Exception as e:
+                print(f"[Hermes] Multimodal chat failed ({e}), falling back")
+
+        if self._transport_mode == "gateway_runs" and not has_image:
             try:
                 await self._run_via_gateway_runs(agent_task, on_event=on_event)
                 return
@@ -515,13 +607,14 @@ class HermesAgentBridge(AgentBridge):
     ) -> None:
         session = await get_http_manager().get_session()
         base = self._base_url()
-        headers = self._headers(agent_task.session_id)
+        headers = self._headers_for_task(agent_task)
         headers["Idempotency-Key"] = f"spark-{agent_task.task_id}"
 
         prompt_text = self._build_agent_prompt(agent_task)
         payload: Dict[str, Any] = {
             "input": prompt_text,
             "instructions": self._build_system_instructions(agent_task),
+            "session_id": agent_task.session_id,
         }
         if self.cfg.model:
             payload["model"] = self.cfg.model
@@ -703,18 +796,33 @@ class HermesAgentBridge(AgentBridge):
         endpoint_url: str,
         on_event: Optional[EventCallback] = None,
         is_local_fallback: bool = False,
+        attach_camera: bool = False,
     ) -> None:
         """Stream from Hermes `/v1/chat/completions` (or upstream OpenAI server)."""
         session = await get_http_manager().get_session()
-        headers = self._headers(agent_task.session_id)
+        headers = self._headers_for_task(agent_task)
 
         model_name = self.cfg.model
         if is_local_fallback and model_name == "hermes-agent":
             model_name = os.getenv("LLM_MODEL", "qwen3-vl")
 
+        user_prompt = self._build_agent_prompt(agent_task)
+        image_b64 = (agent_task.image_b64 or "").strip()
+        if attach_camera and image_b64:
+            if image_b64.startswith("data:"):
+                image_url = image_b64
+            else:
+                image_url = f"data:image/jpeg;base64,{image_b64}"
+            user_content: Any = [
+                {"type": "text", "text": user_prompt},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ]
+        else:
+            user_content = user_prompt
+
         messages = [
             {"role": "system", "content": self._build_system_instructions(agent_task)},
-            {"role": "user", "content": self._build_agent_prompt(agent_task)},
+            {"role": "user", "content": user_content},
         ]
 
         payload: Dict[str, Any] = {
@@ -881,6 +989,143 @@ class HermesAgentBridge(AgentBridge):
                     proc.kill()
                 except ProcessLookupError:
                     pass
+
+    # ------------------------------------------------------------------
+    # Long-term memory context (for local realtime model)
+    # ------------------------------------------------------------------
+
+    def _record_task_summary(self, summary: str) -> None:
+        text = (summary or "").strip()
+        if not text:
+            return
+        self._recent_task_summaries.append(text)
+        self._recent_task_summaries = self._recent_task_summaries[-3:]
+
+    def invalidate_memory_cache(self, identity: str = "default") -> None:
+        ident = (identity or "default").strip() or "default"
+        self._memory_cache.pop(ident, None)
+        self._memory_cached_at.pop(ident, None)
+
+    def get_cached_memory_context(self, identity: str = "default") -> str:
+        """Return cached Hermes memory block (empty if stale/unavailable). Never blocks."""
+        if not self.is_configured():
+            return ""
+        ident = (identity or "default").strip() or "default"
+        now = time.time()
+        ttl = float(self.cfg.memory_ttl)
+        cached = self._memory_cache.get(ident, "")
+        cached_at = self._memory_cached_at.get(ident, 0.0)
+        if cached and (now - cached_at) < ttl:
+            return self._format_memory_block(cached, use_recent=True)
+        if self._recent_task_summaries:
+            return self._format_memory_block("", use_recent=True)
+        return ""
+
+    def schedule_memory_refresh(self, identity: str = "default") -> None:
+        """Refresh memory context in the background without blocking callers."""
+        if not self.is_configured():
+            return
+        ident = (identity or "default").strip() or "default"
+        existing = self._memory_refresh_tasks.get(ident)
+        if existing and not existing.done():
+            return
+        self._memory_refresh_tasks[ident] = asyncio.create_task(self._refresh_memory_context(ident))
+
+    async def get_memory_context(self, identity: str = "default") -> str:
+        """Cached memory context; triggers background refresh when stale."""
+        ident = (identity or "default").strip() or "default"
+        cached = self.get_cached_memory_context(ident)
+        now = time.time()
+        ttl = float(self.cfg.memory_ttl)
+        cached_at = self._memory_cached_at.get(ident, 0.0)
+        if not self._memory_cache.get(ident) or (now - cached_at) >= ttl:
+            self.schedule_memory_refresh(ident)
+        return cached
+
+    async def _refresh_memory_context(self, identity: str) -> None:
+        if self._transport_mode == "unconfigured":
+            await self._probe_backend()
+        if self._transport_mode not in ("gateway_runs", "gateway_chat"):
+            return
+
+        ident = (identity or "default").strip() or "default"
+        await self.ensure_hermes_api_session(ident)
+        session = await get_http_manager().get_session()
+        base = self._base_url()
+        headers = dict(self._headers(ident))
+        headers["Accept"] = "application/json"
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "Summarize what you remember about the user and outcomes of recent delegated tasks. "
+                    "Respond in plain text, at most 150 words, no markdown headers."
+                ),
+            },
+            {
+                "role": "user",
+                "content": "Provide a concise memory summary for the Spark realtime voice assistant.",
+            },
+        ]
+        payload = {
+            "model": self.cfg.model,
+            "messages": messages,
+            "stream": False,
+            "max_tokens": 320,
+            "temperature": 0.2,
+        }
+        if self.cfg.provider:
+            payload["provider"] = self.cfg.provider
+
+        try:
+            async with session.post(
+                f"{base}/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=float(self.cfg.memory_fetch_timeout)),
+            ) as resp:
+                if resp.status != 200:
+                    return
+                data = await resp.json()
+        except Exception as exc:
+            print(f"[Hermes] memory context fetch failed: {exc}")
+            return
+
+        choices = data.get("choices") or []
+        if not choices:
+            return
+        message = choices[0].get("message") or {}
+        content = (message.get("content") or "").strip()
+        if not content:
+            return
+        words = content.split()
+        if len(words) > 150:
+            content = " ".join(words[:150])
+        self._memory_cache[ident] = content
+        self._memory_cached_at[ident] = time.time()
+
+    def _format_memory_block(self, hermes_summary: str, *, use_recent: bool = True) -> str:
+        lines = [f"---\n{self._memory_section_marker}"]
+        if hermes_summary:
+            lines.append(hermes_summary.strip())
+        if use_recent and self._recent_task_summaries:
+            lines.append("\nRecent delegated tasks:")
+            for item in self._recent_task_summaries[-3:]:
+                lines.append(f"- {item}")
+        lines.append("---")
+        return "\n".join(lines)
+
+    def merge_memory_into_system_prompt(self, base_prompt: str, memory_block: str) -> str:
+        if not memory_block:
+            return base_prompt
+        marker = self._memory_section_marker
+        pattern = re.compile(
+            r"\n---\n" + re.escape(marker) + r"[\s\S]*?\n---",
+            re.MULTILINE,
+        )
+        stripped = pattern.sub("", base_prompt).rstrip()
+        return stripped + "\n\n" + memory_block
 
     # ------------------------------------------------------------------
     # Prompt & Artifact Helpers

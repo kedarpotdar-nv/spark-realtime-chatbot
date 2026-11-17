@@ -237,9 +237,13 @@ source ~/hermes-agent/.venv/bin/activate
 export OPENAI_BASE_URL="http://127.0.0.1:8080/v1"
 export OPENAI_API_KEY="local-spark"
 export HERMES_WORKSPACE="$HOME/spark-realtime/workspace"
+export API_SERVER_ENABLED=true
+export API_SERVER_KEY="your-local-gateway-secret"
 
 hermes gateway --host 127.0.0.1 --port 8642
 ```
+
+The gateway HTTP API listens on `127.0.0.1:8642`, requires `API_SERVER_ENABLED=true`, and expects Bearer auth via `API_SERVER_KEY` (set the same value as `HERMES_API_KEY` in spark-realtime).
 
 Then start `spark-realtime` with `HERMES_URL` configured:
 
@@ -255,6 +259,19 @@ export HERMES_URL="http://127.0.0.1:8642"
 2. **`gateway_chat`**: Hermes Gateway `/v1/chat/completions` streaming SSE (supporting `hermes.tool.progress` events and reasoning deltas).
 3. **`cli`**: Subprocess fallback via `hermes chat -q ...` when the `hermes` CLI binary is on `PATH` (`HERMES_CLI_PATH`).
 4. **`local_openai`**: Built-in local agentic execution loop against `HERMES_UPSTREAM_URL` (defaults to `LLM_SERVER_URL` on port `8080`) when `HERMES_ENABLED=true` is set without a separate gateway daemon.
+
+### Two-layer memory: local Qwen realtime + Hermes brain
+
+Spark keeps a **fast local path** (Qwen via `llama-server` on the voice/video WebSocket) and a **background Hermes path** (`agents/hermes.py`) for long-running work:
+
+- **Realtime (local)**: ASR → Qwen3-VL → TTS on `/ws/voice` (never blocked by Hermes).
+- **Background (Hermes)**: `delegate_task` → Hermes Gateway `/v1/runs` or `/v1/chat/completions` with streaming tool progress.
+
+**Persistent Hermes sessions**: The bridge stores a stable `X-Hermes-Session-Key` (long-term memory scope) and `X-Hermes-Session-Id` (transcript identity) per client identity in `workspace/.hermes_sessions.json` (override with `HERMES_SESSION_STORE`). Sessions are created via `POST /api/sessions` when the gateway supports it; both headers are sent on every gateway call.
+
+**Memory injection**: On voice session connect (and after a delegated task completes), spark-realtime asynchronously asks Hermes—via a short non-streaming `/v1/chat/completions` on the persistent session—for a ≤150-word summary of user context and recent task results. The cached text is appended to the **local** model system prompt under a `## Long-term memory (from Hermes)` section. If Hermes is unreachable, the voice loop uses the last cache or proceeds without memory (`HERMES_MEMORY_TTL`, default 10 minutes).
+
+**Camera on delegate**: During an active video call, `delegate_task` can attach the latest camera frame to Hermes using multimodal `/v1/chat/completions` (`image_url` data URI). Control with the `include_camera` tool parameter (default `true` when video is active).
 
 ---
 
@@ -458,7 +475,12 @@ All configuration options live in `config.py`, `launch-https.sh`, and `tts_serve
 | **Hermes Agent Bridge** | | |
 | `HERMES_URL` | `""` (unset; probes `http://127.0.0.1:8642` when enabled) | Hermes Gateway URL (`http://127.0.0.1:8642`). Unset degrades gracefully to `unconfigured` |
 | `HERMES_ENABLED` | `auto` (`true` if `HERMES_URL`, `HERMES_API_KEY`, or `hermes` CLI is present; `false` otherwise) | Explicitly enable (`true`) or disable (`false`) the Hermes bridge |
-| `HERMES_API_KEY` | `""` (fallback: `API_SERVER_KEY`) | Bearer token for Hermes Gateway authentication |
+| `HERMES_API_KEY` | `""` (fallback: `API_SERVER_KEY`) | Bearer token for Hermes Gateway authentication (match Hermes `API_SERVER_KEY` when `API_SERVER_ENABLED=true`) |
+| `HERMES_SESSION_KEY` | `spark-realtime:<SPARK_USER_ID or identity>` | Long-term memory scope (`X-Hermes-Session-Key`, max 256 chars) |
+| `HERMES_SESSION_STORE` | `./workspace/.hermes_sessions.json` | JSON file mapping client identity → persistent Hermes session ids |
+| `HERMES_MEMORY_TTL` | `600` | Seconds to cache Hermes memory summaries injected into the local system prompt |
+| `HERMES_MEMORY_FETCH_TIMEOUT` | `8` | Timeout (seconds) for background Hermes memory fetch |
+| `SPARK_USER_ID` | `default` | Stable per-user/browser identity for Hermes session persistence |
 | `HERMES_MODEL` | `hermes-agent` | Model identifier sent to Hermes Gateway |
 | `HERMES_PROVIDER` | `""` | Optional upstream provider hint for Hermes |
 | `HERMES_UPSTREAM_URL` | `LLM_SERVER_URL` (`http://localhost:8080/v1/chat/completions`) | OpenAI-compatible fallback endpoint used in `local_openai` mode |
@@ -567,9 +589,9 @@ The web interface in `static/` is a three-pane console with zero external CDN de
 ## Architecture
 
 ```
-Browser (HTTPS / WSS :9443) ──► FastAPI Server (server.py) ──► llama.cpp (Qwen3-VL :8080, Nemotron :8005)
+Browser (HTTPS / WSS :9443) ──► FastAPI Server (server.py) ──► llama.cpp (Qwen3-VL :8080, Nemotron :8005)  ← realtime voice/vision
                                    │
-                                   ├── Hermes Agent Bridge (agents/hermes.py ──► Hermes Gateway :8642 / CLI / OpenAI)
+                                   ├── Hermes Agent Bridge (agents/hermes.py ──► Hermes Gateway :8642 / CLI / OpenAI)  ← background brain + memory
                                    ├── Shared Workspace API (/api/workspace/* & ./workspace)
                                    ├── ASR (faster-whisper, local or :9000)
                                    ├── TTS (Kokoro 24kHz PCM streaming, local or tts_server.py :9002)
