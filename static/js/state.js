@@ -46,8 +46,11 @@ const POST_TTS_COOLDOWN_MS = 250;
 let bargeInEnabled = false;
 let isTtsPlaying = false;
 
-// Push-to-Talk state
+// Push-to-Talk state (default: hands-free VAD; user override persisted in localStorage)
 let pttMode = false;
+let pendingHandsFreeSetup = false;
+let pendingSessionGreeting = false;
+const INPUT_MODE_STORAGE_KEY = 'spark_input_mode';
 let pttRecording = false;
 let pttProcessing = false;
 let pttMediaRecorder = null;

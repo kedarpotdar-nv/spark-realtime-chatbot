@@ -19,6 +19,11 @@ function loadChatsFromStorage() {
     const stored = localStorage.getItem('spark_realtime_chats');
     if (stored) {
       chats = JSON.parse(stored) || {};
+      Object.values(chats).forEach((chat) => {
+        if (Array.isArray(chat.messages) && chat.messages.length > 0) {
+          chat.greeted = true;
+        }
+      });
     }
   } catch (e) {
     chats = {};
@@ -163,7 +168,10 @@ function loadChat(chatId) {
 
   teardownVoiceCallMode();
   teardownVideoCallMode();
-  setModeSwitchUI('chat');
+
+  const chatForMode = chats[chatId];
+  const mode = (chatForMode && chatForMode.mode) || 'chat';
+  setModeSwitchUI(mode);
 
   currentChatId = chatId;
   const chat = chats[chatId];
@@ -187,6 +195,10 @@ function loadChat(chatId) {
     scrollToBottom();
   } else {
     conversationEl.innerHTML = renderEmptyState(chat?.mode || 'chat');
+  }
+
+  if (mode === 'call' || mode === 'video') {
+    pendingHandsFreeSetup = true;
   }
 }
 
@@ -222,6 +234,7 @@ function clearChat() {
   if (currentChatId && chats[currentChatId]) {
     chats[currentChatId].messages = [];
     chats[currentChatId].preview = '';
+    chats[currentChatId].greeted = false;
     saveChatsToStorage();
     renderChatList();
   }
@@ -230,7 +243,7 @@ function clearChat() {
   }
 }
 
-function createDefaultSession(mode = 'chat') {
+function createDefaultSession(mode = 'call') {
   const chatId = generateChatId();
   const titles = { chat: 'Voice & Text Session', call: 'Voice Call', video: 'Video Call' };
   chats[chatId] = {
@@ -239,7 +252,8 @@ function createDefaultSession(mode = 'chat') {
     preview: '',
     timestamp: new Date().toISOString(),
     messages: [],
-    mode
+    mode,
+    greeted: false
   };
   currentChatId = chatId;
   saveChatsToStorage();
@@ -275,8 +289,10 @@ function switchWorkspaceMode(mode) {
   }
 
   if (mode === 'call') {
+    pendingHandsFreeSetup = true;
     setupVoiceCallMode();
   } else if (mode === 'video') {
+    pendingHandsFreeSetup = true;
     setupVideoCallMode();
   } else {
     setSystemState('idle');
@@ -316,7 +332,9 @@ function startSelectedChat() {
   closeMobileDrawers();
   if (currentChatId && chats[currentChatId]) saveCurrentChat();
   createDefaultSession(selectedChatMode);
+  resetServerConversation();
   switchWorkspaceMode(selectedChatMode);
+  setTimeout(() => requestSessionGreetingIfNeeded(), 120);
 }
 
 // Settings & Prompts Modal
@@ -510,7 +528,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   loadChatsFromStorage();
   const existingIds = Object.keys(chats);
   if (existingIds.length === 0) {
-    createDefaultSession('chat');
+    createDefaultSession('call');
   } else {
     const newest = existingIds.sort((a, b) => new Date(chats[b].timestamp || 0) - new Date(chats[a].timestamp || 0))[0];
     loadChat(newest);
@@ -580,7 +598,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     pttBtn.addEventListener('touchend', (e) => { e.preventDefault(); stopRecording(); }, { passive: false });
   }
 
+  initInputModeFromStorage();
+
   await loadDefaultSystemPrompt();
   await fetchHermesStatus();
   connectVoiceWebSocket();
+
+  const bootMode = chats[currentChatId]?.mode;
+  if (bootMode === 'call' || bootMode === 'video') {
+    pendingHandsFreeSetup = true;
+    setModeSwitchUI(bootMode);
+  }
 });

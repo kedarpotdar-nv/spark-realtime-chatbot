@@ -457,6 +457,7 @@ function teardownVideoCallMode() {
 // ============================================================================
 function setInputMode(mode) {
   pttMode = mode === 'ptt';
+  localStorage.setItem(INPUT_MODE_STORAGE_KEY, pttMode ? 'ptt' : 'vad');
   const vadBtn = document.getElementById('vadModeBtn');
   const pttBtn = document.getElementById('pttModeBtn');
   const pttContainer = document.getElementById('videoCallPttContainer');
@@ -666,6 +667,40 @@ function initializeAudioContext() {
 
 function initializeAudioOnConnection() {
   initializeAudioContext().catch(() => {});
+}
+
+function initInputModeFromStorage() {
+  const stored = localStorage.getItem(INPUT_MODE_STORAGE_KEY);
+  if (stored === 'ptt') {
+    setInputMode('ptt');
+  } else {
+    setInputMode('vad');
+  }
+}
+
+function ensurePendingHandsFreeSetup() {
+  if (!pendingHandsFreeSetup || !currentChatId) return;
+  const mode = chats[currentChatId]?.mode || 'call';
+  if (mode !== 'call' && mode !== 'video') return;
+  pendingHandsFreeSetup = false;
+  if (mode === 'call') {
+    setupVoiceCallMode();
+  } else {
+    setupVideoCallMode();
+  }
+}
+
+function initializeAudioOnInteraction() {
+  initializeAudioContext().then(() => {
+    ensurePendingHandsFreeSetup();
+    trySendSessionGreeting();
+  }).catch(() => {});
+}
+
+if (typeof document !== 'undefined') {
+  ['click', 'keydown', 'touchstart'].forEach((evt) => {
+    document.addEventListener(evt, initializeAudioOnInteraction, { capture: true });
+  });
 }
 
 function stopTtsPlayback() {
