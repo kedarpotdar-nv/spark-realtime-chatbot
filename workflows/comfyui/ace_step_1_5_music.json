@@ -2,11 +2,23 @@
   "104": {
     "class_type": "UNETLoader",
     "inputs": {
-      "unet_name": "acestep_v1.5_xl_turbo_bf16.safetensors",
+      "unet_name": "acestep_v1.5_turbo.safetensors",
       "weight_dtype": "default"
     },
     "_meta": {
-      "title": "UNETLoader"
+      "title": "UNET"
+    }
+  },
+  "105": {
+    "class_type": "DualCLIPLoader",
+    "inputs": {
+      "clip_name1": "qwen_0.6b_ace15.safetensors",
+      "clip_name2": "qwen_4b_ace15.safetensors",
+      "type": "ace",
+      "device": "default"
+    },
+    "_meta": {
+      "title": "CLIP"
     }
   },
   "106": {
@@ -15,7 +27,7 @@
       "vae_name": "ace_1.5_vae.safetensors"
     },
     "_meta": {
-      "title": "VAELoader"
+      "title": "VAE"
     }
   },
   "98": {
@@ -30,16 +42,32 @@
   },
   "47": {
     "class_type": "ConditioningZeroOut",
-    "inputs": {},
+    "inputs": {
+      "conditioning": ["94", 0]
+    },
     "_meta": {
       "title": "ConditioningZeroOut"
+    }
+  },
+  "78": {
+    "class_type": "ModelSamplingAuraFlow",
+    "inputs": {
+      "model": ["104", 0],
+      "shift": 3
+    },
+    "_meta": {
+      "title": "ModelSamplingAuraFlow"
     }
   },
   "3": {
     "class_type": "KSampler",
     "inputs": {
+      "model": ["78", 0],
+      "positive": ["94", 0],
+      "negative": ["47", 0],
+      "latent_image": ["98", 0],
       "seed": 0,
-      "control_after_generate": "fixed",
+      "control_after_generate": "randomize",
       "steps": 8,
       "cfg": 1,
       "sampler_name": "euler",
@@ -50,37 +78,34 @@
       "title": "SEED"
     }
   },
-  "78": {
-    "class_type": "ModelSamplingAuraFlow",
-    "inputs": {},
-    "_meta": {
-      "title": "ModelSamplingAuraFlow"
-    }
-  },
   "18": {
     "class_type": "VAEDecodeAudio",
-    "inputs": {},
-    "_meta": {
-      "title": "VAEDecodeAudio"
-    }
-  },
-  "105": {
-    "class_type": "DualCLIPLoader",
     "inputs": {
-      "clip_name1": "qwen_0.6b_ace15.safetensors",
-      "clip_name2": "qwen_4b_ace15.safetensors",
-      "type": "ace",
-      "device": "default"
+      "samples": ["3", 0],
+      "vae": ["106", 0]
     },
     "_meta": {
-      "title": "DualCLIPLoader"
+      "title": "VAEDecodeAudio"
     }
   },
   "94": {
     "class_type": "TextEncodeAceStepAudio1.5",
     "inputs": {
-      "tags": "Late Night Trap, 95 BPM, Heavy 808 Bass, Wet Synths, Female Background Vocals, Male Rap Vocals + Seductive Female Vocals, Dark Bedroom Production, Atmospheric Club Vibes, Breathy Whispers, Slap Bass, Deep Sub Bass, Cinematic R&B Soundtrack Feel",
-      "lyrics": "[Verse 1]\nOpen up the canvas, blank slate on my screen\nDrag a checkpoint loader, you know what I mean\nKSampler in the middle, VAE on the right\nClip text encode, yeah I'm building tonight\n[Chorus]\nConnect the nodes, run the queue\nWatch the latent flow right through\nGreen dot to green dot, link it up\nPositive prompt in my cup\n[Verse 2]\nEmpty latent image, set the width and height\nPlug it to the sampler, get the settings right\nCFG at seven, steps at twenty-two\nHit that Queue Prompt button, render coming through\n[Bridge]\nUpscale node, ControlNet in the chain\nLora stacked on Lora driving me insane\nSave image at the end of every single flow\nRed wire means broken \u2014 fix it, let it go\n[Outro]\nNodes connected, workflow clean\nBest AI pipeline you ever seen\nComfyUI, yeah we building art\nOne node at a time right from the start"
+      "clip": ["105", 0],
+      "tags": "",
+      "lyrics": "",
+      "seed": 0,
+      "bpm": 120,
+      "duration": 120,
+      "timesignature": "4",
+      "language": "en",
+      "keyscale": "E minor",
+      "generate_audio_codes": true,
+      "cfg_scale": 2,
+      "temperature": 0.85,
+      "top_p": 0.9,
+      "top_k": 0,
+      "min_p": 0
     },
     "_meta": {
       "title": "TAGS"
@@ -89,7 +114,8 @@
   "111": {
     "class_type": "SaveAudioAdvanced",
     "inputs": {
-      "filename_prefix": "audio/ACE_Step1.5_xl_turbo",
+      "audio": ["18", 0],
+      "filename_prefix": "spark/ace_step",
       "format": "mp3",
       "quality": "V0"
     },

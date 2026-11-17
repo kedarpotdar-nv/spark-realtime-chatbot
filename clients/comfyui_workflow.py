@@ -239,6 +239,9 @@ def inject_ace_music(
             node.setdefault("inputs", {})["seconds"] = dur
         else:
             node.setdefault("inputs", {})["value"] = dur
+    for _, node in wf.items():
+        if node.get("class_type") == "TextEncodeAceStepAudio1.5":
+            node.setdefault("inputs", {})["duration"] = dur
     for _, node in find_nodes_by_slot(wf, "TAGS"):
         if node.get("class_type") == "TextEncodeAceStepAudio1.5":
             wv = node.get("inputs", {}).get("widgets")  # fallback
@@ -262,8 +265,13 @@ def inject_ace_music(
             ctype = node.get("class_type")
             if ctype == "KSampler":
                 node.setdefault("inputs", {})["seed"] = seed
-            elif ctype in ("RandomNoise", "PrimitiveInt"):
+            elif ctype == "RandomNoise":
+                node.setdefault("inputs", {})["noise_seed"] = seed
+            elif ctype in ("PrimitiveInt", "PrimitiveNode"):
                 node.setdefault("inputs", {})["value"] = seed
+        for _, node in wf.items():
+            if node.get("class_type") == "TextEncodeAceStepAudio1.5":
+                node.setdefault("inputs", {})["seed"] = seed
     if model_overrides.get("unet"):
         for _, node in find_nodes_by_slot(wf, "UNET"):
             _set_unet_name(node, model_overrides["unet"])

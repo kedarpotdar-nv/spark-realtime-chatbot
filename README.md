@@ -217,15 +217,22 @@ Spark can generate **images** and **music** on the same machine via [ComfyUI](ht
 
 ### Models & templates
 
-Shipped API-format workflows (derived from [Comfy-Org/workflow_templates](https://github.com/Comfy-Org/workflow_templates)) live in `workflows/comfyui/`:
+Shipped API-format workflows (flattened from ComfyUI v0.37 blueprints) live in `workflows/comfyui/`. See `workflows/comfyui/README.md` for node title conventions and validation.
 
-| Workflow file | Upstream template | Models |
-|---------------|-------------------|--------|
-| `flux2_klein_t2i.json` | `image_flux2_klein_text_to_image` | [FLUX.2 Klein 4B](https://huggingface.co/Comfy-Org/flux2-klein) (`flux-2-klein-4b.safetensors`, `qwen_3_4b.safetensors`, `flux2-vae.safetensors`) |
-| `flux2_klein_edit.json` | `image_flux2_klein_image_edit_4b_distilled` | Klein edit (`flux-2-klein-4b-fp8.safetensors`, same CLIP/VAE) |
-| `ace_step_1_5_music.json` | `audio_ace_step1_5_xl_turbo` | [ACE-Step 1.5](https://huggingface.co/Comfy-Org/ace_step_1.5) (`acestep_v1.5_xl_turbo_bf16.safetensors`, `ace_1.5_vae.safetensors`, Qwen ACE CLIP pair) |
+| Workflow file | Source blueprint | Default model filenames |
+|---------------|------------------|-------------------------|
+| `flux2_klein_t2i.json` | FLUX.2 Klein (no reference path) | `flux-2-klein-4b-fp8 (1).safetensors`, `qwen_3_4b (1).safetensors`, `flux2-vae (1).safetensors` |
+| `flux2_klein_edit.json` | Image Edit (Flux.2 Klein 4B) | Same Klein UNet/CLIP/VAE |
+| `ace_step_1_5_music.json` | Text to Audio (ACE-Step 1.5) | `acestep_v1.5_turbo.safetensors`, `qwen_0.6b_ace15.safetensors`, `qwen_4b_ace15.safetensors`, `ace_1.5_vae.safetensors` |
 
-Place weights under your ComfyUI install (`ComfyUI/models/diffusion_models`, `text_encoders`, `vae`, etc.) per each template’s model card. If node names differ on your build, export **API format** from ComfyUI and override paths with env vars below.
+Place weights under your ComfyUI `models/` tree. Validate before running Spark:
+
+```bash
+python scripts/validate_comfy_workflows.py "/path/to/ComfyUI"
+python scripts/validate_comfy_workflows.py "/path/to/ComfyUI" --url http://127.0.0.1:8188
+```
+
+If node names differ on your build, export **API format** from ComfyUI and override paths with env vars below. `/prompt` HTTP 400 responses include ComfyUI `error` and `node_errors` in Spark logs and tool errors.
 
 ### Launch ComfyUI on the Spark
 
@@ -282,7 +289,7 @@ curl -sk -X POST https://127.0.0.1:9443/api/media/generate \
 
 Register as a Hermes tool with HTTP POST to `https://<spark-host>:9443/api/media/generate`, or call from skills via `curl`/HTTP client. Responses include `path` (workspace-relative) on success.
 
-> **Note**: Bundled ACE/music workflows are best-effort API exports from official UI templates. If ComfyUI rejects a prompt, replace the JSON with your own **Save (API Format)** export and point `COMFYUI_*_WORKFLOW` at it.
+> **Note**: If validation fails or ComfyUI rejects a prompt after an upgrade, replace the JSON with your own **Save (API Format)** export and point `COMFYUI_*_WORKFLOW` at it.
 
 ---
 

@@ -1,12 +1,21 @@
 # ComfyUI workflow templates (API format)
 
-These JSON files are **ComfyUI API prompts** (not UI canvas exports). They were derived from [Comfy-Org/workflow_templates](https://github.com/Comfy-Org/workflow_templates):
+These JSON files are **ComfyUI API prompts** (flattened, no subgraph proxies). They were rebuilt from ComfyUI v0.37 blueprint subgraphs:
 
-| File | Source template |
-|------|-----------------|
-| `flux2_klein_t2i.json` | `image_flux2_klein_text_to_image` (FLUX.2 Klein 4B Distilled subgraph) |
-| `flux2_klein_edit.json` | `image_flux2_klein_image_edit_4b_distilled` |
-| `ace_step_1_5_music.json` | `audio_ace_step1_5_xl_turbo` |
+| File | Source blueprint |
+|------|------------------|
+| `flux2_klein_t2i.json` | `Image Edit (Flux.2 Klein 4B)` without reference-image path (Klein loaders, euler, 20 steps, cfg 5) |
+| `flux2_klein_edit.json` | `Image Edit (Flux.2 Klein 4B)` with `Reference Conditioning` inlined |
+| `ace_step_1_5_music.json` | `Text to Audio (ACE-Step 1.5)` |
+
+Default checkpoint filenames match a typical local install (`flux-2-klein-4b-fp8 (1).safetensors`, `qwen_3_4b (1).safetensors`, `flux2-vae (1).safetensors`, `acestep_v1.5_turbo.safetensors`, etc.) and are overridable via env (see below).
+
+Validate against your ComfyUI tree:
+
+```bash
+python scripts/validate_comfy_workflows.py "/path/to/ComfyUI"
+python scripts/validate_comfy_workflows.py "/path/to/ComfyUI" --url http://127.0.0.1:8188
+```
 
 If your ComfyUI build or custom nodes differ, export your own workflow via **Save (API format)** and set `COMFYUI_FLUX_T2I_WORKFLOW`, `COMFYUI_FLUX_EDIT_WORKFLOW`, or `COMFYUI_ACE_WORKFLOW`.
 

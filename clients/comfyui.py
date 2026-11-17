@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -14,7 +15,45 @@ import aiohttp
 
 from clients.http_session import get_http_manager
 
+logger = logging.getLogger(__name__)
+
 ProgressCallback = Callable[[Dict[str, Any]], Awaitable[None]]
+
+
+def format_comfyui_prompt_error(status: int, body: str) -> str:
+    """Turn ComfyUI /prompt error JSON into a readable multi-line message."""
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        snippet = body.strip()[:2000]
+        return f"ComfyUI /prompt failed ({status}): {snippet}"
+
+    lines = [f"ComfyUI /prompt failed ({status})"]
+    err = data.get("error")
+    if err is not None:
+        if isinstance(err, dict):
+            parts = [str(err.get("message") or ""), str(err.get("type") or ""), str(err.get("details") or "")]
+            msg = " — ".join(p for p in parts if p and p != "None")
+            lines.append(f"error: {msg or err}")
+        else:
+            lines.append(f"error: {err}")
+
+    node_errors = data.get("node_errors") or {}
+    if node_errors:
+        lines.append("node_errors:")
+        for node_id, ned in node_errors.items():
+            if isinstance(ned, dict):
+                head = f"  [{node_id}]"
+                if ned.get("class_type"):
+                    head += f" ({ned['class_type']})"
+                detail = ned.get("errors") or ned
+                lines.append(f"{head} {detail}")
+            else:
+                lines.append(f"  [{node_id}] {ned}")
+
+    if len(lines) == 1:
+        lines.append(body.strip()[:2000])
+    return "\n".join(lines)
 
 
 @dataclass
@@ -61,7 +100,9 @@ class ComfyUIClient:
         ) as resp:
             body = await resp.text()
             if resp.status >= 400:
-                raise RuntimeError(f"ComfyUI /prompt failed ({resp.status}): {body[:500]}")
+                message = format_comfyui_prompt_error(resp.status, body)
+                logger.error("ComfyUI /prompt rejected: %s", message)
+                raise RuntimeError(message)
             data = json.loads(body)
             prompt_id = data.get("prompt_id")
             if not prompt_id:
