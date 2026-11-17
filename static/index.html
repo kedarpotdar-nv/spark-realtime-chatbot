@@ -1,485 +1,562 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Spark Realtime Chatbot</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.7/dist/bundle.min.js"></script>
-  <link rel="stylesheet" href="/static/css/styles.css">
+  <title>Spark Realtime — DGX Spark Voice &amp; Vision Console</title>
+  <link rel="stylesheet" href="/static/css/styles.css" />
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/ort.min.js"></script>
+  <script src="/static/vendor/vad.bundle.min.js"></script>
 </head>
 <body>
 
-  <!-- Chat Mode Selection Modal -->
-  <div class="chat-mode-modal" id="chatModeModal">
-    <div class="chat-mode-content">
-      <div class="chat-mode-header">
-        <h2>Start New Chat</h2>
-        <p>Choose how you want to interact with Spark</p>
-      </div>
+  <!-- Mobile / Tablet Backdrop Overlay -->
+  <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeMobileDrawers()"></div>
 
-      <div class="chat-mode-grid">
-        <div class="chat-mode-card selected" data-mode="call" onclick="selectChatMode('call')">
-          <div class="chat-mode-card-icon">📞</div>
-          <div class="chat-mode-card-title">Voice Call</div>
-          <div class="chat-mode-card-desc">Hands-free conversation with auto voice detection</div>
+  <!-- Main 3-Pane Application Shell -->
+  <div class="app-shell" id="appShell">
+
+    <!-- ====================================================================
+         Left Sidebar: Sessions / History
+         ==================================================================== -->
+    <aside class="chat-sidebar" id="chatSidebar" aria-label="Sessions history">
+      <div class="sidebar-brand">
+        <div class="brand-identity">
+          <div class="brand-mark" aria-hidden="true">
+            <i data-lucide="cpu" data-size="14"></i>
+          </div>
+          <div class="brand-text">
+            <span class="brand-title">Spark Realtime</span>
+            <span class="brand-subtitle">DGX Spark GB10</span>
+          </div>
         </div>
-        <div class="chat-mode-card" data-mode="video" onclick="selectChatMode('video')">
-          <div class="chat-mode-card-icon">📹</div>
-          <div class="chat-mode-card-title">Video Call</div>
-          <div class="chat-mode-card-desc">Hands-free with camera - show and ask anything</div>
-        </div>
+        <button type="button" class="new-chat-btn" id="newChatBtn" onclick="createNewChat()" aria-label="Start new session">
+          <i data-lucide="plus" data-size="13"></i>
+          <span>New</span>
+        </button>
       </div>
 
-      <div class="chat-mode-actions">
-        <button class="chat-mode-btn cancel" onclick="closeChatModeModal()">Cancel</button>
-        <button class="chat-mode-btn start" id="startChatBtn" onclick="startSelectedChat()">Start Chat</button>
-      </div>
-    </div>
-  </div>
+      <div class="sidebar-section-label">Sessions</div>
+      <div class="chat-list" id="chatList" role="list"></div>
 
-  <!-- Sidebar Overlay (for mobile) -->
-  <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeMobileSidebar()"></div>
-
-  <div class="main-container">
-    <!-- Left Sidebar for Chat History -->
-    <div class="chat-sidebar" id="chatSidebar">
-      <div class="sidebar-header">
-        <h2>Chats</h2>
-        <button class="new-chat-btn" id="newChatBtn" onclick="createNewChat()">+ New</button>
-      </div>
-      <div class="chat-list" id="chatList">
-        <!-- Chat items will be dynamically added here -->
-      </div>
       <div class="sidebar-footer">
-        <button class="clear-history-btn" onclick="clearPreviousChats()">Clear Previous Chats</button>
+        <button type="button" class="clear-history-btn" onclick="clearPreviousChats()" aria-label="Clear previous sessions">
+          <i data-lucide="trash-2" data-size="13"></i>
+          <span>Clear History</span>
+        </button>
+        <button type="button" class="icon-btn" onclick="toggleLog()" title="Toggle diagnostic log" aria-label="Toggle diagnostic log">
+          <i data-lucide="terminal" data-size="15"></i>
+        </button>
       </div>
-    </div>
+    </aside>
 
-    <!-- Main Content Area -->
-    <div class="main-content">
-      <div class="content-wrapper">
-        <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.25rem;">
-          <button class="mobile-menu-btn" id="mobileMenuBtn" onclick="toggleMobileSidebar()" aria-label="Open menu">☰</button>
-          <h1 style="margin: 0;">🎤 Spark Realtime Chatbot</h1>
+    <!-- ====================================================================
+         Center Workspace: Header, Call Stage, Timeline & Bottom Control Bar
+         ==================================================================== -->
+    <main class="center-workspace" aria-label="Conversation workspace">
+      <!-- Top Bar -->
+      <header class="workspace-header">
+        <div class="header-left">
+          <button type="button" class="icon-btn" id="mobileMenuBtn" onclick="toggleLeftSidebar()" title="Toggle sessions sidebar" aria-label="Toggle sessions sidebar">
+            <i data-lucide="panel-left" data-size="16"></i>
+          </button>
+          <div class="session-title-group">
+            <span class="session-title" id="activeSessionTitle">Voice &amp; Text Session</span>
+          </div>
         </div>
 
-  <div class="controls">
-    <div id="connectionStatus" class="connection-status connecting">
-      <span class="status-dot connecting"></span>
-      <span>Connecting...</span>
-    </div>
-    <button id="clearBtn">Clear Chat</button>
-    <button id="disconnectBtn">Disconnect</button>
-    <div style="margin-left: auto; display: flex; align-items: center; gap: 0.5rem;">
-      <label for="voiceSelect" style="font-weight: 500;">Voice:</label>
-      <select id="voiceSelect" style="padding: 0.5rem; border-radius: 6px; border: 1px solid #ddd; font-size: 0.95rem;">
-        <option value="af_bella" selected>Bella</option>
-        <option value="af_heart">Heart</option>
-        <option value="af_nicole">Nicole</option>
-        <option value="af_jessica">Jessica</option>
-        <option value="af_isabella">Isabella</option>
-      </select>
-    </div>
-  </div>
+        <div class="header-center">
+          <div class="system-state-pill" id="systemStatePill" data-state="idle" role="status" aria-live="polite">
+            <span class="state-indicator"></span>
+            <span class="state-pill-label-prefix" style="color:var(--text-muted);">State:</span>
+            <span id="systemStateLabel">Idle</span>
+          </div>
+        </div>
 
-  <!-- Voice Call Mode UI -->
-  <div class="voice-call-container" id="voiceCallContainer">
-    <div class="voice-call-status listening" id="voiceCallStatus">
-      <span class="status-dot"></span>
-      <span id="voiceCallStatusText">Listening...</span>
-    </div>
-    
-    <div class="voice-waveform" id="voiceWaveform">
-      <!-- Bars will be generated by JS -->
-    </div>
-    
-    <div class="voice-call-controls">
-      <button class="voice-call-btn mute" id="voiceCallMuteBtn" onclick="toggleVoiceCallMute()" title="Mute">
-        🎤
-      </button>
-      <button class="voice-call-btn end" id="voiceCallEndBtn" onclick="endVoiceCall()" title="End Call">
-        📞
-      </button>
-    </div>
-    
-    <div class="voice-call-settings">
-      <label>Sensitivity:</label>
-      <input type="range" id="vadSensitivity" min="0" max="1" step="0.1" value="0.5" onchange="updateVadSensitivity(this.value)">
-      <label style="margin-left: 1rem;">Energy Gate:</label>
-      <input type="range" id="energyThreshold" min="0.001" max="0.05" step="0.001" value="0.008" onchange="updateEnergyThreshold(this.value)">
-      <span id="energyThresholdValue" style="font-size: 0.75rem; opacity: 0.7;">0.008</span>
-    </div>
-    <div class="voice-call-energy-meter" style="margin-top: 0.5rem; display: flex; align-items: center; gap: 0.5rem;">
-      <span style="font-size: 0.75rem; opacity: 0.7;">Energy:</span>
-      <div id="voiceEnergyMeter" style="flex: 1; height: 8px; background: rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden;">
-        <div id="voiceEnergyBar" style="height: 100%; width: 0%; background: linear-gradient(90deg, #00b894, #fdcb6e, #e17055); transition: width 0.05s;"></div>
-      </div>
-      <span id="voiceEnergyValue" style="font-size: 0.7rem; opacity: 0.6; min-width: 45px;">0.000</span>
-    </div>
-  </div>
+        <div class="header-right">
+          <div id="connectionStatus" class="connection-status connecting" role="status" aria-live="polite">
+            <span class="status-dot connecting"></span>
+            <span class="connection-status-text">Connecting...</span>
+          </div>
 
-  <!-- Video Call Mode UI - Side by Side Wrapper -->
-  <div class="video-chat-wrapper" id="videoChatWrapper">
-    <div class="video-call-container" id="videoCallContainer">
-      <div class="video-call-webcam">
-        <video id="videoCallWebcam" autoplay playsinline muted></video>
-        <div class="video-call-webcam-status" id="videoCallWebcamStatus">📹 Camera On</div>
+          <div class="latency-badge" title="WebSocket round-trip latency">
+            <i data-lucide="wifi" data-size="12"></i>
+            <span id="latencyValue">-- ms</span>
+          </div>
+
+          <button type="button" class="btn-secondary" id="clearBtn" title="Reset current session" aria-label="Reset current session">
+            <span>Clear</span>
+          </button>
+
+          <button type="button" class="btn-secondary" id="disconnectBtn" aria-label="Connect or disconnect WebSocket">
+            Disconnect
+          </button>
+
+          <button type="button" class="icon-btn" id="themeToggleBtn" onclick="toggleTheme()" title="Toggle dark or light theme" aria-label="Toggle theme">
+            <span id="themeToggleIcon"><i data-lucide="sun" data-size="15"></i></span>
+          </button>
+
+          <button type="button" class="icon-btn" onclick="toggleRightPanel()" title="Toggle agent activity panel" aria-label="Toggle agent activity panel">
+            <i data-lucide="panel-right" data-size="16"></i>
+          </button>
+        </div>
+      </header>
+
+      <!-- Voice Call Stage Bar (Visible when Voice Call Mode is active) -->
+      <section class="voice-call-container" id="voiceCallContainer" aria-label="Voice call controls">
+        <div class="voice-stage-left">
+          <div class="voice-call-status listening" id="voiceCallStatus">
+            <span class="status-dot connected"></span>
+            <span id="voiceCallStatusText">Listening...</span>
+          </div>
+          <div class="voice-waveform" id="voiceWaveform" aria-hidden="true"></div>
+        </div>
+
+        <div class="voice-call-controls">
+          <button type="button" class="call-action-btn mute" id="voiceCallMuteBtn" onclick="toggleVoiceCallMute()" aria-label="Mute microphone">
+            <i data-lucide="mic" data-size="14"></i>
+            <span>Mute</span>
+          </button>
+          <button type="button" class="call-action-btn end" id="voiceCallEndBtn" onclick="endVoiceCall()" aria-label="End voice call">
+            <i data-lucide="phone-off" data-size="14"></i>
+            <span>End Call</span>
+          </button>
+        </div>
+      </section>
+
+      <!-- Main Stage Body (Splits when Video Call is active) -->
+      <div class="workspace-body" id="workspaceBody">
+        <!-- Video Call Dock -->
+        <section class="video-call-container" id="videoCallContainer" aria-label="Video call camera and controls">
+          <div class="video-call-webcam">
+            <video id="videoCallWebcam" autoplay playsinline muted></video>
+            <div class="video-call-webcam-status" id="videoCallWebcamStatus">Camera Active</div>
+          </div>
+
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+            <div class="video-call-status listening" id="videoCallStatus">
+              <span class="status-dot connected"></span>
+              <span id="videoCallStatusText">Listening...</span>
+            </div>
+            <div class="video-call-waveform" id="videoCallWaveform" aria-hidden="true"></div>
+          </div>
+
+          <div class="video-call-controls">
+            <button type="button" class="call-action-btn mute" id="videoCallMuteBtn" onclick="toggleVideoCallMute()" aria-label="Mute video call audio">
+              <i data-lucide="mic" data-size="14"></i>
+              <span>Mute</span>
+            </button>
+            <button type="button" class="call-action-btn camera" id="videoCallCameraBtn" onclick="toggleVideoCallCamera()" aria-label="Toggle camera">
+              <i data-lucide="video" data-size="14"></i>
+              <span>Camera On</span>
+            </button>
+            <button type="button" class="call-action-btn end" id="videoCallEndBtn" onclick="endVideoCall()" aria-label="End video call">
+              <i data-lucide="phone-off" data-size="14"></i>
+              <span>End</span>
+            </button>
+          </div>
+
+          <!-- Input Mode Switch (VAD vs PTT) inside Video Dock -->
+          <div style="display:flex;align-items:center;justify-content:space-between;padding-top:8px;border-top:1px solid var(--border-subtle);">
+            <span style="font-size:11px;color:var(--text-muted);font-family:var(--font-mono);">Turn Detection</span>
+            <div class="mode-segmented">
+              <button type="button" class="mode-seg-btn active" id="vadModeBtn" onclick="setInputMode('vad')">VAD Auto</button>
+              <button type="button" class="mode-seg-btn" id="pttModeBtn" onclick="setInputMode('ptt')">PTT (Space)</button>
+            </div>
+          </div>
+
+          <div id="videoCallPttContainer" style="display:none;">
+            <button type="button" class="btn-primary" id="videoCallPttBtn" style="width:100%;height:36px;justify-content:center;"
+                    onmousedown="startPttRecording(event)"
+                    onmouseup="stopPttRecording(event)"
+                    onmouseleave="stopPttRecording(event)"
+                    ontouchstart="startPttRecording(event)"
+                    ontouchend="stopPttRecording(event)">
+              <i data-lucide="mic" data-size="14"></i>
+              <span>Hold to Talk (Space)</span>
+            </button>
+          </div>
+        </section>
+
+        <!-- Central Conversation Timeline -->
+        <section class="conversation-container" id="conversationContainer" aria-label="Conversation timeline">
+          <div class="conversation" id="conversation" role="log" aria-live="polite"></div>
+        </section>
       </div>
-      
-      <div class="video-call-status listening" id="videoCallStatus">
-        <span class="status-dot"></span>
-        <span id="videoCallStatusText">Listening...</span>
-      </div>
-      
-      <div class="video-call-waveform" id="videoCallWaveform">
-        <!-- Bars will be generated by JS -->
-      </div>
-      
-      <div class="video-call-controls">
-        <button class="video-call-btn mute" id="videoCallMuteBtn" onclick="toggleVideoCallMute()" title="Mute">
-          🎤
-        </button>
-        <button class="video-call-btn camera" id="videoCallCameraBtn" onclick="toggleVideoCallCamera()" title="Camera">
-          📷
-        </button>
-        <button class="video-call-btn" id="videoCallSettingsBtn" onclick="toggleVideoCallSettings()" title="Settings" style="background: #0984e3;">
-          ⚙️
-        </button>
-        <button class="video-call-btn end" id="videoCallEndBtn" onclick="endVideoCall()" title="End Call">
-          📹
-        </button>
-      </div>
-      
-      <!-- Push-to-Talk Button (shown when PTT mode is enabled) -->
-      <div class="video-call-ptt" id="videoCallPttContainer" style="display: none; margin-top: 1rem; text-align: center;">
-        <button class="video-call-ptt-btn" id="videoCallPttBtn" 
-                onmousedown="startPttRecording(event)" 
-                onmouseup="stopPttRecording(event)" 
-                onmouseleave="stopPttRecording(event)"
-                ontouchstart="startPttRecording(event)" 
-                ontouchend="stopPttRecording(event)">
-          <span class="ptt-icon">🎤</span>
-          <span class="ptt-text">Hold to Talk</span>
-          <span class="ptt-key">SPACE</span>
-        </button>
-        <p style="font-size: 0.75rem; opacity: 0.7; margin-top: 0.5rem;">Hold button or press SPACE to talk</p>
-      </div>
-      
-      <!-- Collapsible Settings Panel -->
-      <div class="video-call-settings-panel" id="videoCallSettingsPanel" style="display: none; width: 100%; margin-top: 1rem;">
-        <div style="background: rgba(255,255,255,0.1); border-radius: 8px; padding: 1rem;">
-          <!-- Input Mode Toggle (VAD vs PTT) -->
-          <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);">
-            <label style="font-size: 0.85rem; flex: 1;">
-              <strong>Input Mode</strong>
-            </label>
-            <div style="display: flex; gap: 0.5rem;">
-              <button id="vadModeBtn" onclick="setInputMode('vad')" style="padding: 0.4rem 0.8rem; border-radius: 4px; border: 2px solid #00b894; background: #00b894; color: white; cursor: pointer; font-size: 0.8rem; font-weight: bold;">
-                🎙️ VAD (Auto)
+
+      <!-- Bottom Control Bar -->
+      <footer class="bottom-control-bar" id="textInputContainer" aria-label="Voice and message controls">
+        <div class="control-bar-inner">
+          <div class="composer-row">
+            <button type="button" class="mic-ptt-btn" id="pushToTalkBtn" title="Hold to talk (or hold Space)" aria-label="Push to talk">
+              <i data-lucide="mic" data-size="16"></i>
+            </button>
+
+            <textarea
+              id="textInput"
+              placeholder="Send a message, or hold Space for push-to-talk..."
+              rows="1"
+              aria-label="Message input"
+            ></textarea>
+
+            <button type="button" id="sendTextBtn" class="send-text-btn" onclick="sendTextMessage()" title="Send message" aria-label="Send message">
+              <i data-lucide="send" data-size="15"></i>
+            </button>
+          </div>
+
+          <div class="control-strip">
+            <div class="control-strip-left">
+              <!-- Mode Switcher -->
+              <div class="mode-segmented" role="group" aria-label="Interaction mode">
+                <button type="button" class="mode-seg-btn active" data-mode="chat" onclick="switchWorkspaceMode('chat')" aria-label="Text and push-to-talk mode">
+                  <i data-lucide="message-square" data-size="13"></i>
+                  <span>Chat</span>
+                </button>
+                <button type="button" class="mode-seg-btn" data-mode="call" onclick="switchWorkspaceMode('call')" aria-label="Hands-free voice call mode">
+                  <i data-lucide="phone" data-size="13"></i>
+                  <span>Voice Call</span>
+                </button>
+                <button type="button" class="mode-seg-btn" data-mode="video" onclick="switchWorkspaceMode('video')" aria-label="Live camera video call mode">
+                  <i data-lucide="video" data-size="13"></i>
+                  <span>Video Call</span>
+                </button>
+              </div>
+
+              <!-- Live Audio Level / Waveform + Energy Meter -->
+              <div class="audio-meter-pill" title="Live microphone level and RMS energy gate">
+                <div class="bottom-waveform" id="bottomWaveform" aria-hidden="true"></div>
+                <div class="energy-bar-track" id="voiceEnergyMeter">
+                  <div class="energy-bar-fill" id="bottomEnergyBar"></div>
+                </div>
+                <span class="meter-numeric" id="bottomEnergyValue">0.000</span>
+              </div>
+            </div>
+
+            <div class="control-strip-right">
+              <button type="button" class="icon-btn" id="bottomCameraToggleBtn" onclick="switchWorkspaceMode(videoCallActive ? 'chat' : 'video')" title="Toggle camera vision mode" aria-label="Toggle camera vision mode">
+                <i data-lucide="video" data-size="15"></i>
               </button>
-              <button id="pttModeBtn" onclick="setInputMode('ptt')" style="padding: 0.4rem 0.8rem; border-radius: 4px; border: 2px solid #00b894; background: transparent; color: #00b894; cursor: pointer; font-size: 0.8rem;">
-                ⌨️ PTT (Space)
+
+              <div style="display:inline-flex;align-items:center;gap:6px;">
+                <i data-lucide="volume-2" data-size="14" style="color:var(--text-muted);"></i>
+                <select id="voiceSelect" class="settings-select" style="height:28px;padding:0 8px;width:auto;font-size:12px;" aria-label="TTS Voice">
+                  <option value="af_bella" selected>Bella</option>
+                  <option value="af_heart">Heart</option>
+                  <option value="af_nicole">Nicole</option>
+                  <option value="af_jessica">Jessica</option>
+                  <option value="af_isabella">Isabella</option>
+                </select>
+              </div>
+
+              <button type="button" class="btn-secondary" id="configToggle" onclick="openSettingsModal()" aria-label="Open settings and prompts">
+                <i data-lucide="sliders" data-size="13"></i>
+                <span>Settings</span>
               </button>
             </div>
           </div>
-          <p style="font-size: 0.75rem; opacity: 0.6; margin-bottom: 1rem;">💡 <strong>VAD:</strong> Auto-detects speech | <strong>PTT:</strong> Hold SPACE or button to talk</p>
-
-          <!-- Energy Gate Settings -->
-          <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; padding-bottom: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);">
-            <label style="font-size: 0.85rem; flex: 1;">
-              <strong>Energy Gate</strong> <span style="opacity: 0.7;">(noise filter)</span>
-            </label>
-            <input type="range" id="videoEnergyThreshold" min="0.001" max="0.05" step="0.001" value="0.008" onchange="updateEnergyThreshold(this.value)" style="width: 100px;">
-            <span id="videoEnergyThresholdValue" style="font-size: 0.75rem; opacity: 0.7; min-width: 40px;">0.008</span>
-          </div>
-          <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem;">
-            <span style="font-size: 0.75rem; opacity: 0.7;">Energy:</span>
-            <div id="videoEnergyMeter" style="flex: 1; height: 8px; background: rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden;">
-              <div id="videoEnergyBar" style="height: 100%; width: 0%; background: linear-gradient(90deg, #00b894, #fdcb6e, #e17055); transition: width 0.05s;"></div>
-            </div>
-            <span id="videoEnergyValue" style="font-size: 0.7rem; opacity: 0.6; min-width: 45px;">0.000</span>
-          </div>
         </div>
-      </div>
-    </div>
+      </footer>
+    </main>
 
-    <!-- Conversation container inside the wrapper for side-by-side layout -->
-    <div class="conversation-container video-chat-conversation" id="videoConversationContainer">
-      <div class="conversation" id="videoConversation">
-        <div class="empty-state">
-          <div class="empty-state-icon">📹</div>
-          <div class="empty-state-text">Video call active</div>
-          <div class="empty-state-hint">Your conversation will appear here</div>
+    <!-- ====================================================================
+         Right Panel: Hermes Agent Activity & Workspace Artifacts
+         ==================================================================== -->
+    <aside class="agent-panel" id="agentPanel" aria-label="Hermes Agent activity and workspace artifacts">
+      <div class="agent-panel-header">
+        <div class="agent-panel-title-group">
+          <i data-lucide="activity" data-size="15" style="color:var(--accent);"></i>
+          <span class="agent-panel-title">Hermes Agent</span>
+          <span class="hermes-status-badge" id="hermesStatusBadge">unconfigured</span>
         </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Regular conversation container (shown when not in video call) -->
-  <div class="conversation-container" id="conversationContainer">
-    <div class="conversation" id="conversation">
-      <div class="empty-state">
-        <div class="empty-state-icon">🎤</div>
-        <div class="empty-state-text">Start a conversation</div>
-        <div class="empty-state-hint">Click "+ New" to start a voice or video call</div>
-      </div>
-    </div>
-    
-    <!-- Text Input Area - inside conversation container -->
-    <div class="text-input-container" id="textInputContainer">
-      <div class="text-input-wrapper">
-        <button id="pushToTalkBtn" aria-label="Push to talk">🎤</button>
-        <textarea 
-          id="textInput" 
-          placeholder="Type a message or hold mic to talk..."
-          rows="1"
-        ></textarea>
-        <button id="sendTextBtn" class="send-text-btn" onclick="sendTextMessage()" title="Send message">
-          ➤
+        <button type="button" class="icon-btn" onclick="fetchHermesStatus()" title="Refresh agent &amp; workspace state" aria-label="Refresh agent state">
+          <i data-lucide="refresh-cw" data-size="14"></i>
         </button>
       </div>
-    </div>
-  </div>
 
-  <div class="config-section">
-    <button class="config-toggle" id="configToggle" onclick="toggleConfig()">
-      <span>⚙️ Configuration</span>
-      <span id="configArrow">▼</span>
-    </button>
-    <div class="config-content" id="configContent" style="display: none;">
-      <div class="config-item">
-        <label for="systemPromptInput"><strong>System Prompt:</strong> <span id="systemPromptMode" style="font-size: 0.8rem; color: #7f8c8d;"></span></label>
-        <textarea id="systemPromptInput" rows="4" style="width: 100%; padding: 0.5rem; border-radius: 6px; border: 1px solid #ddd; font-family: inherit; resize: vertical;" placeholder="Loading default prompt..."></textarea>
-        <p style="margin-top: 0.5rem; font-size: 0.85rem; color: #666;">
-          <strong>Note:</strong> System prompt can only be edited when disconnected. Click "Disconnect" to edit, then "Connect" to reconnect.
-        </p>
+      <div class="agent-panel-tabs" role="tablist">
+        <button type="button" class="agent-tab-btn active" id="tabBtnActivity" onclick="switchAgentTab('activity')" role="tab" aria-selected="true">
+          <i data-lucide="terminal" data-size="13"></i>
+          <span>Activity</span>
+          <span class="tab-count" id="activityCountBadge">0</span>
+        </button>
+        <button type="button" class="agent-tab-btn" id="tabBtnArtifacts" onclick="switchAgentTab('artifacts')" role="tab" aria-selected="false">
+          <i data-lucide="folder" data-size="13"></i>
+          <span>Artifacts</span>
+          <span class="tab-count" id="artifactsCountBadge">0</span>
+        </button>
       </div>
 
-      <div class="config-item" style="margin-top: 1.5rem;">
-        <label style="display: block; margin-bottom: 0.75rem; font-weight: 600;"><strong>Agents:</strong> <span style="font-size: 0.75rem; color: #e67e22; font-weight: normal;">(Beta)</span></label>
-        <div style="display: flex; flex-direction: column; gap: 0.75rem;">
-          <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: normal;">
-            <input type="checkbox" id="agentReasoningAssistant" value="reasoning_assistant" style="width: 18px; height: 18px; cursor: pointer;">
-            <span>🧠 Reasoning Assistant <span style="font-size: 0.75rem; color: #76b900;">(Nemotron)</span></span>
-          </label>
-          <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: normal;">
-            <input type="checkbox" id="agentMarkdownAssistant" value="markdown_assistant" style="width: 18px; height: 18px; cursor: pointer;">
-            <span>📝 Markdown Assistant</span>
-          </label>
-          <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: normal;">
-            <input type="checkbox" id="agentHtmlAssistant" value="html_assistant" style="width: 18px; height: 18px; cursor: pointer;">
-            <span>🌐 HTML Assistant</span>
-          </label>
+      <!-- Tab 1: Hermes Task Progress & Tool Calls -->
+      <div id="hermesActivityView" style="display:flex;flex-direction:column;flex:1;min-height:0;">
+        <div class="hermes-delegate-box">
+          <div class="hermes-delegate-row">
+            <input
+              type="text"
+              id="hermesDelegateInput"
+              class="hermes-delegate-input"
+              placeholder="Delegate background task to Hermes..."
+              aria-label="Delegate background task to Hermes"
+            />
+            <select id="hermesCategorySelect" class="settings-select" style="width:92px;height:32px;padding:0 6px;font-size:11.5px;" aria-label="Task category">
+              <option value="coding" selected>Coding</option>
+              <option value="project">Project</option>
+              <option value="research">Research</option>
+              <option value="general">General</option>
+            </select>
+            <button type="button" class="btn-primary" style="height:32px;" onclick="submitHermesTaskFromUI()" aria-label="Dispatch Hermes task">
+              <i data-lucide="play" data-size="12"></i>
+            </button>
+          </div>
         </div>
-        <p style="margin-top: 0.75rem; font-size: 0.85rem; color: #666;">
-          <em>Complex agents that open specialized UIs for streaming output.</em>
-        </p>
+
+        <div class="hermes-panel-body" id="hermesTasksList" aria-live="polite"></div>
       </div>
-      
-    </div>
+
+      <!-- Tab 2: Workspace Artifacts List -->
+      <div id="hermesArtifactsView" style="display:none;flex-direction:column;flex:1;min-height:0;">
+        <div class="hermes-panel-body" id="workspaceArtifactsList"></div>
+      </div>
+    </aside>
   </div>
 
-  <!-- Agent Markdown Editor Modal -->
-  <div id="agentMarkdownEditorModal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 10000; padding: 2rem;">
-    <div style="background: white; border-radius: 12px; height: 100%; display: flex; flex-direction: column; max-width: 1200px; margin: 0 auto; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
-      <div style="padding: 1.5rem; border-bottom: 1px solid #e0e0e0; display: flex; justify-content: space-between; align-items: center;">
+  <!-- ======================================================================
+       Modal 1: Start New Session Mode Selection
+       ====================================================================== -->
+  <div class="modal-backdrop" id="chatModeModal" role="dialog" aria-modal="true" aria-labelledby="newSessionModalTitle">
+    <div class="modal-card">
+      <div class="modal-header">
         <div>
-          <h2 style="margin: 0; font-size: 1.5rem; color: #2c3e50;">📝 Markdown Assistant</h2>
-          <p style="margin: 0.5rem 0 0 0; color: #666; font-size: 0.9rem;" id="markdownTaskDescription">Working on your document...</p>
+          <h2 id="newSessionModalTitle">New Session</h2>
+          <p>Select an interaction mode for this session</p>
         </div>
-        <div style="display: flex; gap: 0.5rem;">
-          <button id="copyMarkdownBtn" style="background: #3498db; color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">📋 Copy</button>
-          <button id="closeMarkdownModal" style="background: #e74c3c; color: white; border: none; padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 1rem;">Close</button>
+        <button type="button" class="icon-btn" onclick="closeChatModeModal()" aria-label="Close modal">
+          <i data-lucide="x" data-size="16"></i>
+        </button>
+      </div>
+
+      <div class="modal-body">
+        <div class="chat-mode-grid">
+          <div class="chat-mode-card" data-mode="chat" onclick="selectChatMode('chat')">
+            <div class="chat-mode-card-icon"><i data-lucide="message-square" data-size="18"></i></div>
+            <div class="chat-mode-card-title">Chat &amp; PTT</div>
+            <div class="chat-mode-card-desc">Text and push-to-talk (<kbd>Space</kbd>) with background tool execution</div>
+          </div>
+          <div class="chat-mode-card selected" data-mode="call" onclick="selectChatMode('call')">
+            <div class="chat-mode-card-icon"><i data-lucide="phone" data-size="18"></i></div>
+            <div class="chat-mode-card-title">Voice Call</div>
+            <div class="chat-mode-card-desc">Continuous hands-free conversation with local Silero VAD</div>
+          </div>
+          <div class="chat-mode-card" data-mode="video" onclick="selectChatMode('video')">
+            <div class="chat-mode-card-icon"><i data-lucide="video" data-size="18"></i></div>
+            <div class="chat-mode-card-title">Video Call</div>
+            <div class="chat-mode-card-desc">Live camera stream paired with Qwen3-VL vision &amp; face recognition</div>
+          </div>
         </div>
       </div>
-      <div style="flex: 1; overflow: hidden; padding: 1.5rem; display: flex; gap: 1rem;">
-        <!-- Raw Markdown Section -->
-        <div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
-          <div style="background: #2d2d2d; padding: 0.5rem 1rem; border-radius: 8px 8px 0 0; border-bottom: 2px solid #1e1e1e;">
-            <span style="color: #858585; font-size: 0.85rem; font-weight: 600;">MARKDOWN</span>
-          </div>
-          <div style="background: #1e1e1e; border-radius: 0 0 8px 8px; padding: 1rem; font-family: 'Monaco', 'Menlo', 'Courier New', monospace; color: #d4d4d4; flex: 1; white-space: pre-wrap; overflow-x: auto; overflow-y: auto; font-size: 0.9rem; line-height: 1.5;" id="agentMarkdownEditor">
-            <span style="color: #6a9955;">// Waiting for agent to start writing...</span>
-          </div>
-        </div>
-        <!-- Preview Section -->
-        <div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
-          <div style="background: #f8f9fa; padding: 0.5rem 1rem; border-radius: 8px 8px 0 0; border-bottom: 2px solid #e9ecef;">
-            <span style="color: #495057; font-size: 0.85rem; font-weight: 600;">PREVIEW</span>
-          </div>
-          <div style="background: white; border: 1px solid #e9ecef; border-top: none; border-radius: 0 0 8px 8px; padding: 1.5rem; flex: 1; overflow-x: auto; overflow-y: auto; line-height: 1.6;" id="agentMarkdownPreview">
-            <span style="color: #adb5bd; font-style: italic;">Preview will appear here...</span>
-          </div>
-        </div>
-      </div>
-      <div style="padding: 1rem; border-top: 1px solid #e0e0e0; background: #f8f9fa;">
-        <div style="display: flex; gap: 0.5rem; align-items: center;">
-          <div id="markdownStatus" style="display: flex; align-items: center; gap: 0.5rem;">
-            <span style="width: 8px; height: 8px; background: #3498db; border-radius: 50%; animation: pulse 2s infinite;"></span>
-            <span style="color: #666;">Agent is working...</span>
-          </div>
-        </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn-secondary" onclick="closeChatModeModal()">Cancel</button>
+        <button type="button" class="btn-primary" id="startChatBtn" onclick="startSelectedChat()">Start Session</button>
       </div>
     </div>
   </div>
 
-  <style>
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.5; }
-    }
-    /* Markdown Preview Styles */
-    #agentMarkdownPreview h1 { font-size: 1.8rem; margin: 1rem 0 0.5rem 0; color: #2c3e50; border-bottom: 2px solid #e9ecef; padding-bottom: 0.5rem; }
-    #agentMarkdownPreview h2 { font-size: 1.5rem; margin: 1rem 0 0.5rem 0; color: #34495e; border-bottom: 1px solid #e9ecef; padding-bottom: 0.3rem; }
-    #agentMarkdownPreview h3 { font-size: 1.25rem; margin: 0.8rem 0 0.4rem 0; color: #495057; }
-    #agentMarkdownPreview h4 { font-size: 1.1rem; margin: 0.6rem 0 0.3rem 0; color: #495057; }
-    #agentMarkdownPreview p { margin: 0.5rem 0; }
-    #agentMarkdownPreview ul, #agentMarkdownPreview ol { margin: 0.5rem 0; padding-left: 1.5rem; }
-    #agentMarkdownPreview li { margin: 0.25rem 0; }
-    #agentMarkdownPreview code { background: #f1f3f4; padding: 0.15rem 0.4rem; border-radius: 4px; font-family: 'Monaco', 'Menlo', monospace; font-size: 0.9em; color: #c7254e; }
-    #agentMarkdownPreview pre { background: #1e1e1e; color: #d4d4d4; padding: 1rem; border-radius: 6px; overflow-x: auto; margin: 0.5rem 0; }
-    #agentMarkdownPreview pre code { background: none; padding: 0; color: #d4d4d4; }
-    #agentMarkdownPreview blockquote { border-left: 4px solid #3498db; margin: 0.5rem 0; padding-left: 1rem; color: #666; background: #f8f9fa; padding: 0.5rem 1rem; }
-    /* Enhanced Table Styles */
-    #agentMarkdownPreview table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.95rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-    #agentMarkdownPreview thead { background: linear-gradient(to bottom, #f8f9fa, #e9ecef); }
-    #agentMarkdownPreview th { border: 1px solid #dee2e6; padding: 0.75rem 1rem; text-align: left; font-weight: 600; color: #2c3e50; }
-    #agentMarkdownPreview td { border: 1px solid #dee2e6; padding: 0.75rem 1rem; text-align: left; }
-    #agentMarkdownPreview tbody tr:nth-child(even) { background: #f8f9fa; }
-    #agentMarkdownPreview tbody tr:hover { background: #e3f2fd; }
-    #agentMarkdownPreview a { color: #3498db; text-decoration: none; }
-    #agentMarkdownPreview a:hover { text-decoration: underline; }
-    #agentMarkdownPreview hr { border: none; border-top: 2px solid #e9ecef; margin: 1.5rem 0; }
-    #agentMarkdownPreview strong { font-weight: 600; }
-    #agentMarkdownPreview em { font-style: italic; }
-    /* Mermaid diagram styles */
-    #agentMarkdownPreview .mermaid { background: #fff; padding: 1rem; border-radius: 8px; margin: 1rem 0; border: 1px solid #e9ecef; text-align: center; }
-    #agentMarkdownPreview .mermaid svg { max-width: 100%; height: auto; }
-    /* Fix for nested list items */
-    #agentMarkdownPreview ul ul, #agentMarkdownPreview ol ol, #agentMarkdownPreview ul ol, #agentMarkdownPreview ol ul { margin: 0.25rem 0; }
-  </style>
-
-  <!-- Agent HTML Editor Modal with Live Preview -->
-  <div id="agentHtmlEditorModal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 10000; padding: 2rem;">
-    <div style="background: white; border-radius: 12px; height: 100%; display: flex; flex-direction: column; max-width: 1400px; margin: 0 auto; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
-      <div style="padding: 1.5rem; border-bottom: 1px solid #e0e0e0; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(to right, #667eea, #764ba2); color: white; border-radius: 12px 12px 0 0;">
+  <!-- ======================================================================
+       Modal 2: Settings, Prompts, Tools, Audio & Face Recognition
+       ====================================================================== -->
+  <div class="modal-backdrop" id="settingsModal" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
+    <div class="modal-card">
+      <div class="modal-header">
         <div>
-          <h2 style="margin: 0; font-size: 1.5rem;">🌐 HTML Assistant</h2>
-          <p style="margin: 0.5rem 0 0 0; opacity: 0.9; font-size: 0.9rem;" id="htmlTaskDescription">Building your webpage...</p>
+          <h2 id="settingsModalTitle">Configuration &amp; Agents</h2>
+          <p>System prompt, enabled tools, audio thresholds, and face recognition</p>
         </div>
-        <div style="display: flex; gap: 0.5rem;">
-          <button id="copyHtmlBtn" onclick="copyHtmlCode()" style="background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.3); padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">📋 Copy</button>
-          <button id="downloadHtmlBtn" onclick="downloadHtml()" style="background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.3); padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">💾 Download</button>
-          <button onclick="closeHtmlEditor()" style="background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.3); padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 1rem;">✕ Close</button>
+        <button type="button" class="icon-btn" onclick="closeSettingsModal()" aria-label="Close settings">
+          <i data-lucide="x" data-size="16"></i>
+        </button>
+      </div>
+
+      <div class="modal-body" id="configContent">
+        <!-- System Prompt & Vision Templates -->
+        <div class="settings-group">
+          <div class="settings-label">
+            <span>System Prompt</span>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <select class="settings-select" style="width:auto;height:26px;padding:0 8px;font-size:11.5px;" onchange="applyVisionTemplate(this.value)" aria-label="Prompt template">
+                <option value="">Load Vision Preset...</option>
+                <option value="general">General Vision</option>
+                <option value="whiteboard">Whiteboard Co-Pilot</option>
+                <option value="notes">Notes to Action Plan</option>
+                <option value="fashion">Outfit Advisor</option>
+              </select>
+              <button type="button" class="btn-secondary" id="savePromptBtn" style="height:26px;" onclick="saveSystemPromptNow()">Apply Prompt</button>
+            </div>
+          </div>
+          <textarea id="systemPromptInput" class="settings-textarea" rows="4" placeholder="System instructions..."></textarea>
+        </div>
+
+        <!-- Enabled Agent Tools -->
+        <div class="settings-group">
+          <div class="settings-label"><span>Background Agents &amp; Tools</span></div>
+          <div class="checkbox-grid">
+            <label class="checkbox-card">
+              <input type="checkbox" id="agentHermesDelegate" data-tool-checkbox value="delegate_task" checked />
+              <div>
+                <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">Hermes Agent Bridge</div>
+                <div style="font-size:11.5px;color:var(--text-muted);">Non-blocking coding, project &amp; research tasks (<code>delegate_task</code>)</div>
+              </div>
+            </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="agentReasoningAssistant" data-tool-checkbox value="reasoning_assistant" checked />
+              <div>
+                <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">Reasoning Assistant</div>
+                <div style="font-size:11.5px;color:var(--text-muted);">Deep analysis &amp; prioritization via Nemotron</div>
+              </div>
+            </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="agentMarkdownAssistant" data-tool-checkbox value="markdown_assistant" checked />
+              <div>
+                <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">Markdown Assistant</div>
+                <div style="font-size:11.5px;color:var(--text-muted);">Structured technical docs &amp; live preview</div>
+              </div>
+            </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="agentHtmlAssistant" data-tool-checkbox value="html_assistant" checked />
+              <div>
+                <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">HTML Live Assistant</div>
+                <div style="font-size:11.5px;color:var(--text-muted);">Interactive single-file HTML/CSS/JS preview</div>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- Audio / VAD Controls -->
+        <div class="settings-group">
+          <div class="settings-label">
+            <span>VAD Sensitivity &amp; RMS Energy Gate</span>
+            <span id="settingsEnergyThresholdValue" style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted);">0.008</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div>
+              <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:4px;">VAD Positive Threshold (<span id="vadSensitivityValue">0.50</span>)</div>
+              <input type="range" id="vadSensitivity" min="0.2" max="0.9" step="0.05" value="0.5" onchange="updateVadSensitivity(this.value)" style="width:100%;accent-color:var(--accent);" />
+            </div>
+            <div>
+              <div style="font-size:11.5px;color:var(--text-muted);margin-bottom:4px;">RMS Energy Gate (<span id="energyThresholdValue">0.008</span>)</div>
+              <input type="range" id="energyThreshold" min="0.001" max="0.05" step="0.001" value="0.008" onchange="updateEnergyThreshold(this.value)" style="width:100%;accent-color:var(--accent);" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Face Recognition Management -->
+        <div class="settings-group">
+          <div class="settings-label"><span>Face Recognition (DeepFace)</span></div>
+          <div style="display:flex;gap:8px;">
+            <input type="text" id="enrollFaceNameInput" class="settings-input" placeholder="Person name (requires active Video Call camera)..." />
+            <button type="button" class="btn-secondary" onclick="enrollCurrentFace()">
+              <i data-lucide="user-check" data-size="14"></i>
+              <span>Enroll Frame</span>
+            </button>
+          </div>
+          <div id="enrolledFacesList" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;"></div>
         </div>
       </div>
-      <div style="flex: 1; overflow: hidden; padding: 1rem; display: flex; gap: 1rem;">
-        <!-- Code Section -->
-        <div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
-          <div style="background: #2d2d2d; padding: 0.5rem 1rem; border-radius: 8px 8px 0 0; border-bottom: 2px solid #1e1e1e; display: flex; justify-content: space-between; align-items: center;">
-            <span style="color: #858585; font-size: 0.85rem; font-weight: 600;">HTML / CSS / JS</span>
-            <span id="htmlCharCount" style="color: #666; font-size: 0.75rem;">0 chars</span>
-          </div>
-          <div style="background: #1e1e1e; border-radius: 0 0 8px 8px; padding: 1rem; font-family: 'Monaco', 'Menlo', 'Courier New', monospace; color: #d4d4d4; flex: 1; white-space: pre-wrap; overflow-x: auto; overflow-y: auto; font-size: 0.85rem; line-height: 1.5;" id="agentHtmlEditor">
-            <span style="color: #6a9955;">// Waiting for agent to start writing...</span>
-          </div>
-        </div>
-        <!-- Live Preview Section -->
-        <div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
-          <div style="background: #f8f9fa; padding: 0.5rem 1rem; border-radius: 8px 8px 0 0; border-bottom: 2px solid #e9ecef; display: flex; justify-content: space-between; align-items: center;">
-            <span style="color: #495057; font-size: 0.85rem; font-weight: 600;">📱 LIVE PREVIEW</span>
-            <button onclick="refreshHtmlPreview()" style="background: #3498db; color: white; border: none; padding: 0.25rem 0.5rem; border-radius: 4px; cursor: pointer; font-size: 0.75rem;">🔄 Refresh</button>
-          </div>
-          <iframe id="agentHtmlPreview" style="flex: 1; border: 1px solid #e9ecef; border-top: none; border-radius: 0 0 8px 8px; background: white;" sandbox="allow-scripts allow-same-origin"></iframe>
-        </div>
-      </div>
-      <div style="padding: 1rem; border-top: 1px solid #e0e0e0; background: #f8f9fa; border-radius: 0 0 12px 12px;">
-        <div style="display: flex; gap: 0.5rem; align-items: center;">
-          <div id="htmlStatus" style="display: flex; align-items: center; gap: 0.5rem;">
-            <span style="width: 8px; height: 8px; background: #3498db; border-radius: 50%; animation: pulse 2s infinite;"></span>
-            <span style="color: #666;">Agent is building...</span>
-          </div>
-        </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn-primary" onclick="closeSettingsModal()">Done</button>
       </div>
     </div>
   </div>
 
-  <!-- Agent Reasoning Modal (Nemotron) -->
-  <div id="agentReasoningModal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 10000; padding: 2rem;">
-    <div style="background: white; border-radius: 12px; height: 100%; display: flex; flex-direction: column; max-width: 1200px; margin: 0 auto; box-shadow: 0 20px 60px rgba(0,0,0,0.3);">
-      <div style="padding: 1.5rem; border-bottom: 1px solid #e0e0e0; display: flex; justify-content: space-between; align-items: center; background: linear-gradient(to right, #76b900, #4a7c00); color: white; border-radius: 12px 12px 0 0;">
+  <!-- ======================================================================
+       Modal 3: Markdown / Code Artifact Workbench Modal
+       ====================================================================== -->
+  <div class="modal-backdrop" id="agentMarkdownEditorModal" role="dialog" aria-modal="true" aria-labelledby="markdownModalTitle">
+    <div class="modal-card modal-xl">
+      <div class="modal-header">
         <div>
-          <h2 style="margin: 0; font-size: 1.5rem;">🧠 Reasoning Assistant <span style="font-size: 0.85rem; opacity: 0.9;">(Nemotron)</span></h2>
-          <p style="margin: 0.5rem 0 0 0; opacity: 0.9; font-size: 0.9rem;" id="reasoningTaskDescription">Analyzing...</p>
+          <h2 id="markdownModalTitle">Document &amp; Artifact Workbench</h2>
+          <p id="markdownTaskDescription">Streaming output...</p>
         </div>
-        <div style="display: flex; gap: 0.5rem;">
-          <button id="copyReasoningBtn" onclick="copyReasoningOutput()" style="background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.3); padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">📋 Copy</button>
-          <button onclick="closeReasoningModal()" style="background: rgba(255,255,255,0.2); color: white; border: 1px solid rgba(255,255,255,0.3); padding: 0.5rem 1rem; border-radius: 6px; cursor: pointer; font-size: 1rem;">✕ Close</button>
-        </div>
-      </div>
-      <div style="flex: 1; overflow: hidden; padding: 1.5rem; display: flex; gap: 1rem;">
-        <!-- Thinking Section -->
-        <div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
-          <div style="background: #1a1a2e; padding: 0.5rem 1rem; border-radius: 8px 8px 0 0; border-bottom: 2px solid #16213e; display: flex; align-items: center; gap: 0.5rem;">
-            <span style="font-size: 1rem;">💭</span>
-            <span style="color: #a0a0a0; font-size: 0.85rem; font-weight: 600;">THINKING</span>
-            <span id="thinkingIndicator" style="width: 8px; height: 8px; background: #76b900; border-radius: 50%; animation: pulse 1s infinite; margin-left: auto;"></span>
-          </div>
-          <div style="background: #0f0f1a; border-radius: 0 0 8px 8px; padding: 1rem; font-family: 'Monaco', 'Menlo', 'Courier New', monospace; color: #8b949e; flex: 1; white-space: pre-wrap; overflow-x: auto; overflow-y: auto; font-size: 0.85rem; line-height: 1.6;" id="agentReasoningThinking">
-            <span style="color: #6a9955;">// Reasoning process will appear here...</span>
-          </div>
-        </div>
-        <!-- Conclusion Section -->
-        <div style="flex: 1; display: flex; flex-direction: column; min-height: 0;">
-          <div style="background: #f8f9fa; padding: 0.5rem 1rem; border-radius: 8px 8px 0 0; border-bottom: 2px solid #e9ecef; display: flex; align-items: center; gap: 0.5rem;">
-            <span style="font-size: 1rem;">✨</span>
-            <span style="color: #495057; font-size: 0.85rem; font-weight: 600;">CONCLUSION</span>
-          </div>
-          <div style="background: white; border: 1px solid #e9ecef; border-top: none; border-radius: 0 0 8px 8px; padding: 1.5rem; flex: 1; overflow-x: auto; overflow-y: auto; line-height: 1.6;" id="agentReasoningConclusion">
-            <span style="color: #adb5bd; font-style: italic;">Analysis results will appear here...</span>
-          </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span id="markdownStatus" style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted);">Ready</span>
+          <button type="button" class="btn-secondary" id="copyMarkdownBtn" onclick="copyMarkdownToClipboard()">
+            <i data-lucide="copy" data-size="13"></i>
+            <span>Copy</span>
+          </button>
+          <button type="button" class="icon-btn" id="closeMarkdownModal" onclick="closeMarkdownEditor()" aria-label="Close document preview">
+            <i data-lucide="x" data-size="16"></i>
+          </button>
         </div>
       </div>
-      <div style="padding: 1rem; border-top: 1px solid #e0e0e0; background: #f8f9fa; border-radius: 0 0 12px 12px;">
-        <div style="display: flex; gap: 0.5rem; align-items: center;">
-          <div id="reasoningStatus" style="display: flex; align-items: center; gap: 0.5rem;">
-            <span style="width: 8px; height: 8px; background: #76b900; border-radius: 50%; animation: pulse 2s infinite;"></span>
-            <span style="color: #666;">Nemotron is thinking...</span>
-          </div>
+      <div class="split-workbench">
+        <div class="workbench-pane">
+          <div class="workbench-pane-header"><span>SOURCE</span></div>
+          <div class="workbench-code" id="agentMarkdownEditor"></div>
+        </div>
+        <div class="workbench-pane">
+          <div class="workbench-pane-header"><span>RENDERED PREVIEW</span></div>
+          <div class="workbench-preview" id="agentMarkdownPreview"></div>
         </div>
       </div>
     </div>
   </div>
 
-  <style>
-    /* Reasoning conclusion markdown styles */
-    #agentReasoningConclusion h1 { font-size: 1.5rem; margin: 1rem 0 0.5rem 0; color: #2c3e50; border-bottom: 2px solid #76b900; padding-bottom: 0.5rem; }
-    #agentReasoningConclusion h2 { font-size: 1.3rem; margin: 1rem 0 0.5rem 0; color: #34495e; border-bottom: 1px solid #e9ecef; padding-bottom: 0.3rem; }
-    #agentReasoningConclusion h3 { font-size: 1.1rem; margin: 0.8rem 0 0.4rem 0; color: #495057; }
-    #agentReasoningConclusion p { margin: 0.5rem 0; }
-    #agentReasoningConclusion ul, #agentReasoningConclusion ol { margin: 0.5rem 0; padding-left: 1.5rem; }
-    #agentReasoningConclusion li { margin: 0.25rem 0; }
-    #agentReasoningConclusion code { background: #f1f3f4; padding: 0.15rem 0.4rem; border-radius: 4px; font-family: 'Monaco', 'Menlo', monospace; font-size: 0.9em; color: #c7254e; }
-    #agentReasoningConclusion pre { background: #1e1e1e; color: #d4d4d4; padding: 1rem; border-radius: 6px; overflow-x: auto; margin: 0.5rem 0; }
-    #agentReasoningConclusion pre code { background: none; padding: 0; color: #d4d4d4; }
-    #agentReasoningConclusion strong { font-weight: 600; color: #2c3e50; }
-    #agentReasoningConclusion em { font-style: italic; }
-    #agentReasoningConclusion blockquote { border-left: 4px solid #76b900; margin: 0.5rem 0; padding-left: 1rem; color: #666; background: #f8f9fa; padding: 0.5rem 1rem; }
-    #agentReasoningConclusion table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
-    #agentReasoningConclusion th, #agentReasoningConclusion td { border: 1px solid #dee2e6; padding: 0.5rem; text-align: left; }
-    #agentReasoningConclusion thead { background: #f8f9fa; }
-  </style>
+  <!-- ======================================================================
+       Modal 4: HTML Live Preview Workbench Modal
+       ====================================================================== -->
+  <div class="modal-backdrop" id="agentHtmlEditorModal" role="dialog" aria-modal="true" aria-labelledby="htmlModalTitle">
+    <div class="modal-card modal-xl">
+      <div class="modal-header">
+        <div>
+          <h2 id="htmlModalTitle">HTML Live Workbench</h2>
+          <p id="htmlTaskDescription">Building interactive preview...</p>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span id="htmlStatus" style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted);">Ready</span>
+          <button type="button" class="btn-secondary" onclick="refreshHtmlPreview()">
+            <i data-lucide="refresh-cw" data-size="13"></i>
+            <span>Refresh</span>
+          </button>
+          <button type="button" class="btn-secondary" id="copyHtmlBtn" onclick="copyHtmlCode()">
+            <i data-lucide="copy" data-size="13"></i>
+            <span>Copy</span>
+          </button>
+          <button type="button" class="btn-secondary" id="downloadHtmlBtn" onclick="downloadHtml()">
+            <i data-lucide="download" data-size="13"></i>
+            <span>Download</span>
+          </button>
+          <button type="button" class="icon-btn" onclick="closeHtmlEditor()" aria-label="Close HTML preview">
+            <i data-lucide="x" data-size="16"></i>
+          </button>
+        </div>
+      </div>
+      <div class="split-workbench">
+        <div class="workbench-pane">
+          <div class="workbench-pane-header">
+            <span>HTML / CSS / JS</span>
+            <span id="htmlCharCount">0 chars</span>
+          </div>
+          <div class="workbench-code" id="agentHtmlEditor"></div>
+        </div>
+        <div class="workbench-pane">
+          <div class="workbench-pane-header"><span>LIVE SANDBOX</span></div>
+          <iframe id="agentHtmlPreview" class="workbench-iframe" sandbox="allow-scripts allow-same-origin" title="HTML Live Preview"></iframe>
+        </div>
+      </div>
+    </div>
+  </div>
 
-  <button class="toggle-log" onclick="toggleLog()">Toggle Debug Log</button>
-  <div id="log"></div>
+  <!-- Diagnostic Log Drawer -->
+  <div id="log" role="region" aria-label="Diagnostic log"></div>
 
-
+  <!-- Modular Application Scripts -->
+  <script src="/static/js/icons.js"></script>
+  <script src="/static/js/state.js"></script>
+  <script src="/static/js/audio-video.js"></script>
+  <script src="/static/js/hermes-panel.js"></script>
+  <script src="/static/js/websocket.js"></script>
   <script src="/static/js/app.js"></script>
 </body>
 </html>

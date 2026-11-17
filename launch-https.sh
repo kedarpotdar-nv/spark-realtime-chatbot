@@ -39,6 +39,12 @@ export SSL_ENABLED="${SSL_ENABLED:-true}"
 export SSL_KEY="${SSL_KEY:-${SSL_KEYFILE:-key.pem}}"
 export SSL_CERT="${SSL_CERT:-${SSL_CERTFILE:-cert.pem}}"
 
+# Hermes Agent (Nous Research) configuration (optional; degrades gracefully when unset)
+export HERMES_URL="${HERMES_URL:-}"
+export HERMES_MODEL="${HERMES_MODEL:-hermes-agent}"
+export HERMES_TIMEOUT="${HERMES_TIMEOUT:-600}"
+export HERMES_MAX_CONCURRENT="${HERMES_MAX_CONCURRENT:-4}"
+
 # Parse command line flags
 while [[ $# -gt 0 ]]; do
     case "$1" in

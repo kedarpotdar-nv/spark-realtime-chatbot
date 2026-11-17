@@ -76,6 +76,7 @@ RULES:
 - If user says "okay", "thanks", "got it" - just acknowledge briefly
 
 You have access to tools:
+- delegate_task: Delegate complex coding, app-building, or multi-step research tasks to Hermes Agent in the background while you respond immediately.
 - reasoning_assistant: ONLY for customer data, feature requests, prioritization, roadmap questions. Has LOCAL DATA FILES you cannot see.
 - markdown_assistant: Use when asked to "document this", "create notes", or write markdown
 - html_assistant: Use when asked to "build a webpage", "create HTML", "design a UI"

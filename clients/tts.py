@@ -6,15 +6,27 @@ from pathlib import Path
 from typing import AsyncGenerator, Generator, Tuple
 
 import numpy as np
-import torch
 import soundfile as sf
-from kokoro import KPipeline
 
 from config import TTSConfig
 
+try:
+    import torch
+except ImportError:
+    torch = None
+
+try:
+    from kokoro import KPipeline
+except ImportError:
+    KPipeline = None
+
 
 class KokoroTTS:
+    sample_rate: int = 24000
+
     def __init__(self, cfg: TTSConfig):
+        if KPipeline is None:
+            raise RuntimeError("kokoro package is not installed")
         print(f"[TTS] Loading Kokoro pipeline (lang={cfg.lang_code}, voice={cfg.voice})...")
         self.cfg = cfg
 
@@ -31,7 +43,7 @@ class KokoroTTS:
         """Check if CUDA is fully supported (no JIT compilation errors)."""
         try:
             # Quick test to see if basic CUDA ops work
-            if not torch.cuda.is_available():
+            if torch is None or not torch.cuda.is_available():
                 return False
             x = torch.randn(10, device='cuda')
             y = x * 2
@@ -180,4 +192,10 @@ class KokoroTTS:
 
                 # Yield audio data with sample rate immediately
                 yield (audio_bytes, sr)
+
+
+def create_tts(cfg: TTSConfig = None) -> KokoroTTS:
+    """Factory function to create a TTS instance from TTSConfig."""
+    return KokoroTTS(cfg or TTSConfig())
+
 

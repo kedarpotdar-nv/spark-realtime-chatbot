@@ -1,7 +1,8 @@
 """Configuration dataclasses for spark-realtime."""
 
 import os
-from dataclasses import dataclass
+import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -50,6 +51,7 @@ class NemotronConfig:
 @dataclass
 class TTSConfig:
     """Text-to-Speech configuration."""
+    engine: str = os.getenv("TTS_ENGINE", "kokoro")
     lang_code: str = os.getenv("KOKORO_LANG", "a")
     voice: str = os.getenv("KOKORO_VOICE", "af_bella")
     speed: float = float(os.getenv("KOKORO_SPEED", "1.2"))
@@ -67,6 +69,45 @@ class ServerConfig:
     ssl_certfile: str = os.getenv("SSL_CERT", os.getenv("SSL_CERTFILE", "cert.pem"))
 
 
+def _default_hermes_enabled() -> bool:
+    raw = os.getenv("HERMES_ENABLED", "").strip().lower()
+    if raw in ("false", "0", "no", "off"):
+        return False
+    if raw in ("true", "1", "yes", "on"):
+        return True
+    if os.getenv("HERMES_URL", "").strip() or os.getenv("HERMES_API_KEY", "").strip():
+        return True
+    cli = os.getenv("HERMES_CLI_PATH", "hermes").strip() or "hermes"
+    if shutil.which(cli):
+        return True
+    return False
+
+
+@dataclass
+class HermesConfig:
+    """Hermes Agent (Nous Research) background bridge configuration."""
+    enabled: bool = field(default_factory=_default_hermes_enabled)
+    url: str = field(default_factory=lambda: os.getenv("HERMES_URL", "").strip())
+    api_key: str = field(default_factory=lambda: os.getenv("HERMES_API_KEY", os.getenv("API_SERVER_KEY", "")))
+    model: str = field(default_factory=lambda: os.getenv("HERMES_MODEL", "hermes-agent"))
+    provider: str = field(default_factory=lambda: os.getenv("HERMES_PROVIDER", ""))
+    upstream_url: str = field(
+        default_factory=lambda: os.getenv(
+            "HERMES_UPSTREAM_URL",
+            os.getenv("LLM_SERVER_URL", "http://localhost:8080/v1/chat/completions"),
+        )
+    )
+    timeout: int = field(default_factory=lambda: int(os.getenv("HERMES_TIMEOUT", "600")))
+    max_concurrent: int = field(default_factory=lambda: int(os.getenv("HERMES_MAX_CONCURRENT", "4")))
+    cli_path: str = field(default_factory=lambda: os.getenv("HERMES_CLI_PATH", "hermes"))
+    workspace_dir: str = field(
+        default_factory=lambda: os.getenv(
+            "HERMES_WORKSPACE",
+            str(Path(os.getenv("WORKSPACE_ROOT", Path.cwd())).resolve() / "workspace"),
+        )
+    )
+
+
 # Directory paths
 AUDIO_DIR = Path("audio_cache")
 AUDIO_DIR.mkdir(exist_ok=True)
@@ -79,6 +120,10 @@ SAMPLE_RATE = 16000
 
 # Workspace root for file operations
 WORKSPACE_ROOT = Path(os.getenv("WORKSPACE_ROOT", Path.cwd())).resolve()
+
+# Shared agent workspace directory for generated artifacts
+AGENT_WORKSPACE_DIR = Path(os.getenv("HERMES_WORKSPACE", WORKSPACE_ROOT / "workspace")).resolve()
+AGENT_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
 # FFmpeg path
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")

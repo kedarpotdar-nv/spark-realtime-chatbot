@@ -36,6 +36,7 @@ env/
 
 # Project specific
 audio_cache/
+workspace/
 *.wav
 *.webm
 *.mp3

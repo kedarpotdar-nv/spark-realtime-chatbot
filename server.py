@@ -23,11 +23,12 @@ from starlette.websockets import WebSocketState
 
 # Local modules
 from config import (
-    ASRConfig, LLMConfig, VLMConfig, NemotronConfig, TTSConfig, ServerConfig,
-    AUDIO_DIR, STATIC_DIR, SAMPLE_RATE, WORKSPACE_ROOT, FFMPEG_PATH
+    ASRConfig, LLMConfig, VLMConfig, NemotronConfig, TTSConfig, ServerConfig, HermesConfig,
+    AUDIO_DIR, STATIC_DIR, SAMPLE_RATE, WORKSPACE_ROOT, AGENT_WORKSPACE_DIR, FFMPEG_PATH
 )
 from audio import check_ffmpeg_available, decode_webm_bytes_to_pcm_f32
 from tools import get_enabled_tools, execute_tool
+from agents import get_hermes_bridge, AgentEvent
 from clients import (
     HTTPSessionManager,
     create_asr,
@@ -39,7 +40,7 @@ from clients import (
 from clients.http_session import set_http_manager
 
 # Import system prompt
-from prompts import DEFAULT_SYSTEM_PROMPT
+from prompts import DEFAULT_SYSTEM_PROMPT, VISION_TEMPLATE_PROMPTS
 
 
 # -----------------------------
@@ -50,23 +51,14 @@ from prompts import DEFAULT_SYSTEM_PROMPT
 asr = None  # FasterWhisperASR or LocalWhisperASR based on ASR_MODE
 llm: LlamaCppClient = None
 tts: KokoroTTS = None
-
-# Conversation history (in-memory, per-session could be added later)
-conversation_history: List[Dict[str, str]] = [
-    {
-        "role": "system",
-        "content": (
-            "You are a concise, helpful voice assistant. "
-            "Answer in 1–2 short sentences, no internal reasoning or metadata in your reply."
-        ),
-    }
-]
+hermes_bridge = None
+active_voice_sessions: set = set()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize models on startup."""
-    global asr, llm, tts
+    global asr, llm, tts, hermes_bridge
 
     # Initialize shared HTTP session manager first (used by all clients)
     http_manager = HTTPSessionManager()
@@ -74,20 +66,37 @@ async def lifespan(app: FastAPI):
 
     # Check ffmpeg availability at startup
     if not check_ffmpeg_available():
-        print(f"⚠️  WARNING: ffmpeg not found at '{FFMPEG_PATH}'")
+        print(f"WARNING: ffmpeg not found at '{FFMPEG_PATH}'")
         print(f"   Audio decoding will fail. Install ffmpeg:")
         print(f"   - Ubuntu/Debian: sudo apt install ffmpeg")
         print(f"   - macOS: brew install ffmpeg")
         print(f"   - Or set FFMPEG_PATH environment variable to ffmpeg location")
     else:
-        print(f"✅ ffmpeg found at '{FFMPEG_PATH}'")
+        print(f"ffmpeg found at '{FFMPEG_PATH}'")
 
     asr = create_asr(ASRConfig())
     # Warmup ASR model to eliminate cold-start latency
     if hasattr(asr, 'warmup'):
-        asr.warmup()
+        try:
+            asr.warmup()
+        except Exception as e:
+            print(f"[ASR] Warmup skipped/failed: {e}")
     llm = LlamaCppClient(LLMConfig())
-    tts = KokoroTTS(TTSConfig())
+    try:
+        tts = KokoroTTS(TTSConfig())
+    except Exception as e:
+        print(f"[TTS] Initialization error (TTS may be unavailable): {e}")
+        tts = None
+
+    # Initialize and warm up Hermes Agent bridge (non-blocking)
+    hermes_bridge = get_hermes_bridge()
+    try:
+        await hermes_bridge.warmup()
+        status = await hermes_bridge.check_status()
+        print(f"[Hermes] Bridge initialized (configured={status['configured']}, transport={status['transport']})")
+    except Exception as e:
+        print(f"[Hermes] Warmup notice: {e}")
+
     yield
     # Cleanup: close shared HTTP session
     if http_manager:
@@ -114,6 +123,7 @@ app = FastAPI(title="Voice Chat (Streaming)", lifespan=lifespan)
 # Serve static files (frontend)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 app.mount("/audio", StaticFiles(directory=str(AUDIO_DIR)), name="audio")
+app.mount("/workspace", StaticFiles(directory=str(AGENT_WORKSPACE_DIR)), name="workspace")
 
 
 # -----------------------------
@@ -129,8 +139,90 @@ async def health_check():
 @app.get("/api/default_prompt")
 async def get_default_prompt():
     """Get the default system prompt from prompts.py."""
-    from prompts import DEFAULT_SYSTEM_PROMPT
-    return {"prompt": DEFAULT_SYSTEM_PROMPT}
+    from prompts import DEFAULT_SYSTEM_PROMPT, VISION_TEMPLATE_PROMPTS
+    return {
+        "prompt": DEFAULT_SYSTEM_PROMPT,
+        "templates": VISION_TEMPLATE_PROMPTS,
+    }
+
+
+@app.get("/api/agents/status")
+async def get_agents_status():
+    """Return status and configuration of Hermes Agent and built-in tools."""
+    bridge = get_hermes_bridge()
+    hermes_status = await bridge.check_status()
+    return {
+        "hermes": hermes_status,
+        "tasks": [t.to_dict() for t in bridge.list_tasks()[:25]],
+        "artifacts": [a.to_dict() for a in bridge.list_artifacts()[:50]],
+    }
+
+
+@app.get("/api/agents/tasks")
+async def list_agent_tasks():
+    """List background agent tasks."""
+    bridge = get_hermes_bridge()
+    return {"tasks": [t.to_dict() for t in bridge.list_tasks()[:50]]}
+
+
+@app.post("/api/agents/delegate")
+async def delegate_agent_task(request: Request):
+    """Delegate a background task to Hermes Agent via REST and stream updates to active WebSockets."""
+    data = await request.json()
+    task_desc = (data.get("task") or "").strip()
+    context = (data.get("context") or "").strip()
+    category = (data.get("category") or "general").strip()
+    if not task_desc:
+        return {"success": False, "error": "Task description is required"}
+
+    bridge = get_hermes_bridge()
+    if not bridge.is_configured():
+        return {"success": False, "error": "Hermes Agent is not configured"}
+
+    async def broadcast_event(evt: AgentEvent):
+        for ws_session in list(active_voice_sessions):
+            await ws_session.handle_hermes_event(evt)
+
+    agent_task = await bridge.submit_task(
+        task=task_desc,
+        context=context,
+        category=category,
+        on_event=broadcast_event,
+    )
+    return {"success": True, "task": agent_task.to_dict()}
+
+
+@app.post("/api/agents/tasks/{task_id}/cancel")
+async def cancel_agent_task(task_id: str):
+    """Cancel an in-flight Hermes task."""
+    bridge = get_hermes_bridge()
+    cancelled = await bridge.cancel_task(task_id)
+    task = bridge.get_task(task_id)
+    if cancelled and task:
+        evt = AgentEvent(task_id=task_id, event_type="task.cancelled", data={"task": task.to_dict()})
+        for ws_session in list(active_voice_sessions):
+            await ws_session.handle_hermes_event(evt)
+    return {"success": cancelled, "task": task.to_dict() if task else None}
+
+
+@app.get("/api/workspace/files")
+async def list_workspace_files():
+    """List generated artifacts in the shared agent workspace."""
+    bridge = get_hermes_bridge()
+    return {
+        "workspace_dir": str(bridge.workspace_dir),
+        "artifacts": [a.to_dict() for a in bridge.list_artifacts()],
+    }
+
+
+@app.get("/api/workspace/file")
+async def read_workspace_file(path: str):
+    """Read a specific file from the shared agent workspace for preview."""
+    bridge = get_hermes_bridge()
+    file_data = bridge.read_artifact(path)
+    if file_data is None:
+        return {"success": False, "error": "Artifact not found"}
+    return {"success": True, "file": file_data}
 
 
 # -----------------------------
@@ -440,7 +532,11 @@ class VoiceSession:
         if not text:
             print(f"[Voice Session] stream_tts: text empty after cleaning")
             return
-        
+
+        if tts is None:
+            print(f"[Voice Session] stream_tts: TTS engine not initialized, skipping audio synthesis")
+            return
+
         print(f"[Voice Session] stream_tts: synthesizing '{text[:50]}...'")
         
         # Use provided voice or session default
@@ -710,35 +806,37 @@ class VoiceSession:
                             is_agent_tool = False
                             for tc in tool_calls:
                                 func = tc.get("function", {})
-                                if func.get("name") in ["markdown_assistant", "reasoning_assistant"]:
+                                if func.get("name") in ["delegate_task", "hermes_agent", "markdown_assistant", "html_assistant", "reasoning_assistant"]:
                                     is_agent_tool = True
                                     break
-                            
+
                             if is_agent_tool:
-                                # Custom feedback for reasoning
                                 for tc in tool_calls:
-                                    if tc.get("function", {}).get("name") == "reasoning_assistant":
-                                        feedback_msg = "Let me think through this..."
+                                    fn_name = tc.get("function", {}).get("name")
+                                    if fn_name == "reasoning_assistant":
+                                        feedback_msg = "Let me think through this."
+                                        break
+                                    elif fn_name in ("delegate_task", "hermes_agent"):
+                                        feedback_msg = "Sure, working on it in the background."
                                         break
                                 else:
                                     feedback_msg = "On it."
                             else:
                                 feedback_msg = "Looking that up for you."
-                            
+
                             # Send conversational feedback
                             await self.send_message("tool_invocation", {"message": feedback_msg})
                             await self.stream_tts(feedback_msg, is_transient=True)
-                            
+
                             # IMPORTANT: Add assistant message with tool_calls to conversation history FIRST
-                            # The LLM server expects this format: assistant message with tool_calls, then tool results
                             assistant_message = {
                                 "role": "assistant",
-                                "content": None,  # No text content, only tool calls
+                                "content": None,
                                 "tool_calls": tool_calls
                             }
                             self.conversation_history.append(assistant_message)
                             print(f"[Voice Session] Added assistant message with {len(tool_calls)} tool call(s) to history")
-                            
+
                             # Execute each tool call
                             tool_results = []
                             for tool_call in tool_calls:
@@ -746,48 +844,84 @@ class VoiceSession:
                                 function = tool_call.get("function", {})
                                 tool_name = function.get("name", "")
                                 arguments_str = function.get("arguments", "{}")
-                                
+
                                 try:
                                     arguments = json.loads(arguments_str)
                                 except json.JSONDecodeError:
                                     arguments = {}
-                                
+
                                 print(f"[Voice Session] Executing tool: {tool_name} with args: {arguments}")
-                                
+
                                 # Execute tool
                                 tool_result = await execute_tool(tool_name, arguments)
                                 print(f"[Voice Session] Tool '{tool_name}' returned: {tool_result[:100]}...")
-                                
+
                                 # Check if this is an agent tool that needs special handling
                                 try:
                                     tool_result_data = json.loads(tool_result)
                                     if tool_result_data.get("agent_type"):
-                                        # This is an agent tool - send signal to open UI
                                         await self.send_message("agent_started", {
                                             "agent_type": tool_result_data.get("agent_type"),
                                             "task": tool_result_data.get("task", ""),
+                                            "category": tool_result_data.get("category", "general"),
                                             "codebase_path": tool_result_data.get("codebase_path", "")
                                         })
                                         print(f"[Voice Session] Agent '{tool_result_data.get('agent_type')}' started - UI should open")
                                 except json.JSONDecodeError:
-                                    pass  # Not JSON, treat as regular tool result
-                                
+                                    pass
+
                                 tool_results.append({
                                     "tool_call_id": tool_id,
                                     "role": "tool",
                                     "name": tool_name,
                                     "content": tool_result
                                 })
-                            
+
                             # Add tool results to conversation history (after assistant message with tool_calls)
                             for tool_result in tool_results:
                                 self.conversation_history.append(tool_result)
                             print(f"[Voice Session] Added {len(tool_results)} tool result(s) to history")
-                            
-                            # Get final response from LLM with tool results
+
+                            # Check if any of the executed tools were agents
+                            is_agent_tool = False
+                            agent_type = None
+                            agent_task = None
+                            agent_context = ""
+                            agent_category = "general"
+                            for tool_result in tool_results:
+                                try:
+                                    result_data = json.loads(tool_result.get("content", "{}"))
+                                    if result_data.get("agent_type"):
+                                        is_agent_tool = True
+                                        agent_type = result_data.get("agent_type")
+                                        agent_task = result_data.get("task", "")
+                                        agent_context = result_data.get("context", "")
+                                        agent_category = result_data.get("category", "general")
+                                        break
+                                except json.JSONDecodeError:
+                                    pass
+
+                            # Background Hermes delegation: dispatch immediately without blocking voice loop
+                            if is_agent_tool and agent_type == "hermes_agent":
+                                ack_text = "Sure, working on that in the background with Hermes."
+                                self.conversation_history.append({"role": "assistant", "content": ack_text})
+                                await self.send_message("final_response", {"text": ack_text})
+                                await self.delegate_to_hermes(
+                                    task=agent_task,
+                                    context=agent_context,
+                                    category=agent_category,
+                                    speak_ack=False,
+                                )
+                                return
+
+                            elif is_agent_tool and agent_type == "html_assistant":
+                                await self.execute_html_agent(agent_task, agent_context)
+                                return
+
+                            # Get final response from LLM with tool results (for non-Hermes tools)
                             print(f"[Voice Session] Getting final response after tool execution")
                             followup_messages = list(self.conversation_history)
-                            
+
                             # Stream final response
                             tool_final_response = ""
                             enabled_tool_defs = get_enabled_tools(self.enabled_tools)
@@ -798,26 +932,10 @@ class VoiceSession:
                                         if "content" in data and data["content"]:
                                             tool_final_response += data["content"]
                                         elif "tool_calls_complete" in data:
-                                            # Another tool call - handle recursively (for now, just break)
                                             print(f"[Voice Session] Another tool call detected, stopping recursion")
                                             break
                                     except json.JSONDecodeError:
                                         pass
-                            
-                            # Check if any of the executed tools were agents
-                            is_agent_tool = False
-                            agent_type = None
-                            agent_task = None
-                            for tool_result in tool_results:
-                                try:
-                                    result_data = json.loads(tool_result.get("content", "{}"))
-                                    if result_data.get("agent_type"):
-                                        is_agent_tool = True
-                                        agent_type = result_data.get("agent_type")
-                                        agent_task = result_data.get("task", "")
-                                        break
-                                except json.JSONDecodeError:
-                                    pass
                             
                             if is_agent_tool and agent_type == "markdown_assistant":
                                 # For markdown assistant, make a separate LLM call to generate markdown
@@ -1261,29 +1379,97 @@ Output the complete HTML code."""
             traceback.print_exc()
             await self.send_message("error", {"error": f"Reasoning agent error: {str(e)}"})
     
+    async def delegate_to_hermes(
+        self,
+        task: str,
+        context: str = "",
+        category: str = "general",
+        speak_ack: bool = False,
+    ):
+        """Dispatch a background task to Hermes Agent and stream events over WebSocket."""
+        bridge = get_hermes_bridge()
+        if not bridge.is_configured():
+            err_text = "Hermes Agent is not configured on this server. Set HERMES_URL or HERMES_ENABLED=true."
+            await self.send_message("error", {"error": err_text})
+            return None
+
+        if speak_ack:
+            ack = "Sure, working on that in the background."
+            await self.send_message("final_response", {"text": ack})
+            await self.stream_tts(ack, is_transient=True)
+
+        async def on_event(evt: AgentEvent):
+            await self.handle_hermes_event(evt)
+
+        agent_task = await bridge.submit_task(
+            task=task,
+            context=context,
+            category=category,
+            on_event=on_event,
+        )
+        return agent_task
+
+    async def handle_hermes_event(self, evt: AgentEvent):
+        """Forward a Hermes Agent background event to the client WebSocket and speak summary on completion."""
+        payload = evt.to_dict()
+        await self.send_message("hermes_event", payload)
+
+        if evt.event_type == "artifact.created":
+            bridge = get_hermes_bridge()
+            await self.send_message("workspace_updated", {
+                "artifacts": [a.to_dict() for a in bridge.list_artifacts()[:50]],
+            })
+
+        elif evt.event_type == "task.completed":
+            task_dict = evt.data.get("task") or {}
+            spoken_summary = evt.data.get("spoken_summary") or task_dict.get("spoken_summary") or ""
+            bridge = get_hermes_bridge()
+            await self.send_message("workspace_updated", {
+                "artifacts": [a.to_dict() for a in bridge.list_artifacts()[:50]],
+            })
+            if spoken_summary:
+                self.conversation_history.append({
+                    "role": "assistant",
+                    "content": f"[Hermes completed task: {task_dict.get('task', '')}] {spoken_summary}",
+                })
+                await self.send_message("hermes_summary", {
+                    "task_id": evt.task_id,
+                    "text": spoken_summary,
+                    "task": task_dict,
+                })
+                await self.stream_tts(spoken_summary, is_transient=False)
+
+        elif evt.event_type == "task.failed":
+            spoken_summary = evt.data.get("spoken_summary") or "Hermes encountered an error on the background task."
+            await self.send_message("hermes_summary", {
+                "task_id": evt.task_id,
+                "text": spoken_summary,
+                "error": evt.data.get("error"),
+                "task": evt.data.get("task"),
+            })
+
     def _extract_spoken_summary(self, text: str, max_sentences: int = 3) -> str:
         """Extract a brief spoken summary from reasoning output."""
-        # Clean up markdown and formatting
         import re
-        
+
         # Remove headers, bullets, code blocks
         text = re.sub(r'^#+\s+.*$', '', text, flags=re.MULTILINE)
         text = re.sub(r'^[-*]\s+', '', text, flags=re.MULTILINE)
         text = re.sub(r'```.*?```', '', text, flags=re.DOTALL)
         text = re.sub(r'`[^`]+`', '', text)
-        
+
         # Split into sentences
         sentences = re.split(r'(?<=[.!?])\s+', text.strip())
         sentences = [s.strip() for s in sentences if s.strip() and len(s) > 10]
-        
+
         # Take first few meaningful sentences
         summary_sentences = sentences[:max_sentences]
         summary = " ".join(summary_sentences)
-        
+
         # Clean up any remaining formatting
         summary = re.sub(r'\*+', '', summary)
         summary = re.sub(r'\s+', ' ', summary).strip()
-        
+
         return summary if len(summary) > 20 else ""
 
 
@@ -1292,17 +1478,24 @@ MIN_AUDIO_SECONDS = 0.5
 
 @app.websocket("/ws/voice")
 async def voice_call(websocket: WebSocket):
-    """Persistent voice call WebSocket - handles ASR, LLM, and TTS."""
+    """Persistent voice call WebSocket - handles ASR, LLM, TTS, and Hermes Agent updates."""
     await websocket.accept()
     session = VoiceSession(websocket)
-    
+    active_voice_sessions.add(session)
+
     print("[Voice Call] Client connected")
     try:
-        await session.send_message("connected", {"status": "ready"})
+        bridge = get_hermes_bridge()
+        hermes_status = await bridge.check_status()
+        await session.send_message("connected", {
+            "status": "ready",
+            "hermes": hermes_status,
+            "tasks": [t.to_dict() for t in bridge.list_tasks()[:25]],
+            "artifacts": [a.to_dict() for a in bridge.list_artifacts()[:50]],
+        })
         # Wait a moment for frontend to send initial voice selection
         await asyncio.sleep(0.2)
         # Send a short greeting (don't add to conversation history)
-        # Pick a random short greeting for variety
         import random
         greetings = [
             "Hey! What's up?",
@@ -1364,8 +1557,40 @@ async def voice_call(websocket: WebSocket):
                             await session.process_user_message(text)
                     
                     elif msg_type == "ping":
-                        # Keep-alive ping
-                        await session.send_message("pong")
+                        # Keep-alive ping (echo client timestamp if provided for latency measurement)
+                        await session.send_message("pong", {"ts": data.get("ts")})
+
+                    elif msg_type == "delegate_task":
+                        # Direct task delegation to Hermes Agent from UI or command
+                        task_text = (data.get("task") or "").strip()
+                        context_text = (data.get("context") or "").strip()
+                        category = (data.get("category") or "general").strip()
+                        speak_ack = bool(data.get("speak_ack", True))
+                        if task_text:
+                            await session.delegate_to_hermes(
+                                task=task_text,
+                                context=context_text,
+                                category=category,
+                                speak_ack=speak_ack,
+                            )
+                        else:
+                            await session.send_message("error", {"error": "Task description is required"})
+
+                    elif msg_type == "cancel_hermes_task":
+                        # Cancel an active Hermes task
+                        task_id = (data.get("task_id") or "").strip()
+                        if task_id:
+                            bridge = get_hermes_bridge()
+                            cancelled = await bridge.cancel_task(task_id)
+                            task_obj = bridge.get_task(task_id)
+                            if cancelled and task_obj:
+                                await session.handle_hermes_event(
+                                    AgentEvent(
+                                        task_id=task_id,
+                                        event_type="task.cancelled",
+                                        data={"task": task_obj.to_dict()},
+                                    )
+                                )
                     
                     elif msg_type == "reset":
                         # Reset conversation
@@ -1647,15 +1872,25 @@ async def voice_call(websocket: WebSocket):
 
                                             print(f"[Video Call] Tool '{tool_name}' args: {args}")
 
-                                            # Send acknowledgment
-                                            await session.stream_tts("On it.", is_transient=True)
-
                                             # Execute tool
-                                            if tool_name == "markdown_assistant":
+                                            if tool_name in ("delegate_task", "hermes_agent"):
+                                                ack = "Sure, working on that in the background."
+                                                await session.send_message("llm_final", {"text": ack})
+                                                await session.stream_tts(ack, is_transient=True)
+                                                await session.delegate_to_hermes(
+                                                    task=args.get("task", ""),
+                                                    context=args.get("context", ""),
+                                                    category=args.get("category", "general"),
+                                                    speak_ack=False,
+                                                )
+                                            elif tool_name == "markdown_assistant":
+                                                await session.stream_tts("On it.", is_transient=True)
                                                 await session.execute_markdown_agent(args.get("task", ""), args.get("context", ""))
                                             elif tool_name == "html_assistant":
+                                                await session.stream_tts("On it.", is_transient=True)
                                                 await session.execute_html_agent(args.get("task", ""), args.get("context", ""))
                                             elif tool_name == "reasoning_assistant":
+                                                await session.stream_tts("Let me think through this.", is_transient=True)
                                                 await session.execute_reasoning_agent(
                                                     args.get("problem", ""),
                                                     args.get("context", ""),
@@ -1726,6 +1961,7 @@ async def voice_call(websocket: WebSocket):
         except:
             pass
     finally:
+        active_voice_sessions.discard(session)
         print("[Voice Call] Session ended")
 
 
