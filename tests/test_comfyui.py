@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from clients.comfyui import ComfyUIClient
+from clients.comfyui import ComfyUIClient, format_comfyui_prompt_error
 from clients.comfyui_workflow import inject_flux_t2i, inject_ace_music, load_workflow
 from clients.comfy_runner import run_comfy_job
 
@@ -29,7 +29,11 @@ def test_inject_flux_t2i_by_title(flux_prompt):
         height=512,
         seed=42,
         steps=6,
-        model_overrides={"unet": "flux-2-klein-4b.safetensors", "clip": "qwen_3_4b.safetensors", "vae": "flux2-vae.safetensors"},
+        model_overrides={
+            "unet": "flux-2-klein-4b-fp8 (1).safetensors",
+            "clip": "qwen_3_4b (1).safetensors",
+            "vae": "flux2-vae (1).safetensors",
+        },
     )
     prompts = [n for n in injected.values() if n.get("class_type") == "CLIPTextEncode"]
     assert any("red bicycle" in (n.get("inputs", {}).get("text") or "") for n in prompts)
@@ -46,7 +50,7 @@ def test_inject_ace_music_tags():
         lyrics="",
         duration_seconds=45,
         seed=7,
-        model_overrides={"unet": "acestep_v1.5_xl_turbo_bf16.safetensors", "vae": "ace_1.5_vae.safetensors"},
+        model_overrides={"unet": "acestep_v1.5_turbo.safetensors", "vae": "ace_1.5_vae.safetensors"},
     )
     enc = next(n for n in injected.values() if n.get("class_type") == "TextEncodeAceStepAudio1.5")
     assert "Chill Lofi" in (enc.get("inputs", {}).get("tags") or "")
@@ -136,6 +140,51 @@ async def test_queue_prompt_and_history_poll(monkeypatch, flux_prompt):
     assert pid == "pid-test-1"
     result = await client.wait_for_outputs(pid, client_id="c1", on_progress=None, poll_interval=0.01)
     assert result.images[0]["filename"] == "spark_00001.png"
+
+
+def test_format_comfyui_prompt_error_parses_node_errors():
+    body = json.dumps(
+        {
+            "error": {"message": "Invalid prompt", "type": "prompt_outputs_failed_validation"},
+            "node_errors": {
+                "70": {"errors": [{"message": "ckpt not found"}], "class_type": "UNETLoader"}
+            },
+        }
+    )
+    msg = format_comfyui_prompt_error(400, body)
+    assert "Invalid prompt" in msg
+    assert "[70]" in msg
+    assert "UNETLoader" in msg
+
+
+@pytest.mark.asyncio
+async def test_queue_prompt_surfaces_400_body(monkeypatch, flux_prompt):
+    client = ComfyUIClient("http://127.0.0.1:8188", timeout_seconds=5)
+    err_json = json.dumps({"error": {"message": "bad graph"}, "node_errors": {}})
+
+    class FakeResp:
+        status = 400
+
+        async def text(self):
+            return err_json
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class FakeSession:
+        def post(self, url, **kwargs):
+            return FakeResp()
+
+    class FakeMgr:
+        async def get_session(self):
+            return FakeSession()
+
+    monkeypatch.setattr("clients.comfyui.get_http_manager", lambda: FakeMgr())
+    with pytest.raises(RuntimeError, match="bad graph"):
+        await client.queue_prompt(flux_prompt)
 
 
 @pytest.mark.asyncio

@@ -237,19 +237,19 @@ class ComfyUIConfig:
         )
     )
     flux_unet: str = field(
-        default_factory=lambda: os.getenv("COMFYUI_FLUX_UNET", "flux-2-klein-4b.safetensors")
+        default_factory=lambda: os.getenv("COMFYUI_FLUX_UNET", "flux-2-klein-4b-fp8 (1).safetensors")
     )
     flux_clip: str = field(
-        default_factory=lambda: os.getenv("COMFYUI_FLUX_CLIP", "qwen_3_4b.safetensors")
+        default_factory=lambda: os.getenv("COMFYUI_FLUX_CLIP", "qwen_3_4b (1).safetensors")
     )
     flux_vae: str = field(
-        default_factory=lambda: os.getenv("COMFYUI_FLUX_VAE", "flux2-vae.safetensors")
+        default_factory=lambda: os.getenv("COMFYUI_FLUX_VAE", "flux2-vae (1).safetensors")
     )
     flux_edit_unet: str = field(
-        default_factory=lambda: os.getenv("COMFYUI_FLUX_EDIT_UNET", "flux-2-klein-4b-fp8.safetensors")
+        default_factory=lambda: os.getenv("COMFYUI_FLUX_EDIT_UNET", "flux-2-klein-4b-fp8 (1).safetensors")
     )
     ace_unet: str = field(
-        default_factory=lambda: os.getenv("COMFYUI_ACE_UNET", "acestep_v1.5_xl_turbo_bf16.safetensors")
+        default_factory=lambda: os.getenv("COMFYUI_ACE_UNET", "acestep_v1.5_turbo.safetensors")
     )
     ace_vae: str = field(
         default_factory=lambda: os.getenv("COMFYUI_ACE_VAE", "ace_1.5_vae.safetensors")
