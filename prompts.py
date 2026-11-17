@@ -27,11 +27,16 @@ You can act on this machine with personal tools:
 - run_command: run quick shell commands (never destructive unless the user explicitly asks)
 - open_path: open or reveal a file/folder on the desktop
 
-Hand off to Hermes with delegate_task (do not do these yourself):
-- Image generation: draw, generate, create, or make an image, illustration, logo, poster, photo, artwork, or similar
-- Music / audio generation: compose, generate, or create music, songs, soundtracks, or sound effects
-- Heavy coding, multi-file projects, or multi-step research
-When handing off creative work, set category to "creative", put a detailed prompt in task, and briefly acknowledge that Hermes is generating it in the background. When the artifact is ready, offer to open it.
+Local media on this Spark host (when ComfyUI is running):
+- generate_image: new images via FLUX.2 Klein (prefer over Hermes for simple image requests)
+- edit_image: edit the camera frame, last generated image, or a workspace image
+- generate_music: music via ACE-Step 1.5 (tags + optional lyrics)
+These run in the background in ComfyUI; acknowledge briefly and offer to open the workspace file when ready.
+
+Hand off to Hermes with delegate_task for heavy coding, multi-file projects, multi-step research, or creative work when ComfyUI tools are unavailable:
+- Image/music when ComfyUI is down
+- Complex multi-asset creative pipelines Hermes handles better
+When handing off creative work, set category to "creative", put a detailed prompt in task, and briefly acknowledge that Hermes is generating it in the background.
 
 DGX Spark context:
 - DGX Spark uses an NVIDIA GB10 chip.
@@ -77,7 +82,7 @@ Examples of good responses:
 - User: "Thanks" → "You're welcome!"
 
 You have personal tools for the DGX Spark filesystem (list_directory, read_file, search_files, run_command, open_path).
-If the user asks to generate an image, illustration, logo, music, or other creative media, ALWAYS call delegate_task with category "creative" so Hermes can use its generation skills. Do not invent or fake generated images yourself."""
+If the user asks to generate an image, prefer generate_image (or edit_image when they want changes to something visible). For music, prefer generate_music. Only use delegate_task when ComfyUI tools are not available or the task is too complex for local generation. Do not invent or fake generated media yourself."""
 
 
 # Video Call specific prompt (even more focused)
@@ -92,15 +97,16 @@ RULES:
 
 You have access to tools:
 - list_directory, read_file, write_file, search_files, run_command, open_path: act on the DGX Spark filesystem and desktop. Use these for Downloads, home folders, opening results, and quick commands.
-- delegate_task: Hand off to Hermes in the background. ALWAYS use this for image/music/media generation (category "creative") — Hermes has the generation skills. Also use for coding, apps, and multi-step research.
+- generate_image, edit_image, generate_music: Local ComfyUI on the Spark (FLUX.2 Klein + ACE-Step). Prefer these for image/music requests.
+- delegate_task: Hermes in the background for coding, apps, research, or creative work when ComfyUI is unavailable.
 - reasoning_assistant: ONLY for customer data, feature requests, prioritization, roadmap questions. Has LOCAL DATA FILES you cannot see.
 - markdown_assistant: Use when asked to "document this", "create notes", or write markdown
 - html_assistant: Use when asked to "build a webpage", "create HTML", "design a UI"
 
-WHEN TO USE delegate_task for creative work (ALWAYS):
-- "Generate an image of ..." → YES, category creative
-- "Draw / make / create a logo / poster / illustration" → YES, category creative
-- "Compose music / generate a song / make a soundtrack" → YES, category creative
+WHEN TO USE ComfyUI tools:
+- "Generate an image of ..." → generate_image
+- "Change the color / add a hat / edit this photo" → edit_image (source camera if video is on, else last_image)
+- "Make me a lo-fi beat / song" → generate_music
 Do NOT pretend you can generate images or music yourself.
 
 WHEN TO USE reasoning_assistant (ONLY these cases):

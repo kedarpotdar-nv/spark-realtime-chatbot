@@ -51,7 +51,10 @@ PREVIEWABLE_EXTENSIONS = {
     ".html", ".htm", ".md", ".txt", ".json", ".py", ".js", ".ts", ".tsx",
     ".jsx", ".css", ".sh", ".yaml", ".yml", ".toml", ".csv", ".svg", ".xml",
     ".sql", ".rs", ".go", ".c", ".cpp", ".h", ".log",
+    ".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp3", ".wav", ".flac", ".ogg",
 }
+
+MEDIA_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp3", ".wav", ".flac", ".ogg"}
 
 IGNORED_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache",
@@ -1292,6 +1295,19 @@ class HermesAgentBridge(AgentBridge):
         stat = target.stat()
         ext = target.suffix.lower()
         mime, _ = mimetypes.guess_type(target.name)
+        if ext in MEDIA_EXTENSIONS or (mime or "").startswith(("image/", "audio/")):
+            return {
+                "path": safe,
+                "name": target.name,
+                "size": stat.st_size,
+                "modified_at": stat.st_mtime,
+                "mime_type": mime or "application/octet-stream",
+                "extension": ext,
+                "binary": True,
+                "content": "",
+                "workspace_url": f"/workspace/{safe}",
+                "truncated": False,
+            }
         raw = target.read_bytes()[:max_bytes]
         content = raw.decode("utf-8", errors="replace")
         return {

@@ -18,6 +18,7 @@ A real-time voice and vision AI assistant running locally on NVIDIA DGX Spark �
 - **Ultra-low latency**: ~320ms voice calls, ~850ms video calls (end-to-end)
 - **Runs entirely on-device**: No cloud APIs required; all frontend dependencies (`marked`, `onnxruntime-web`, `vad-web`, `Inter`, `JetBrains Mono`, and Lucide SVG icons) are vendored locally in `static/`
 - **Vision + Voice**: Video calls with real-time scene understanding (Qwen3-VL)
+- **Local media (ComfyUI)**: On-device image (`generate_image` / `edit_image`, FLUX.2 Klein) and music (`generate_music`, ACE-Step 1.5) via a local ComfyUI API on the Spark, with workspace artifacts and REST `POST /api/media/generate` for Hermes
 - **Hermes Agent Integration**: Non-blocking background task delegation (`delegate_task`) to [Nous Research Hermes Agent](https://github.com/NousResearch/hermes-agent) with live step/tool progress and shared workspace artifact previews
 - **Face Recognition**: Enroll and identify users on the fly (DeepFace)
 - **GB10-optimized**: ASR, LLM, TTS, and vision running locally on DGX Spark
@@ -207,6 +208,81 @@ Start `llama-server` on the host in separate terminals (or via `tmux` / `nohup`)
     --host 0.0.0.0 --port 8005 \
     -ngl 99 -c 32768 --threads 8 --threads-http 8 -fa on --cache-reuse 256
 ```
+
+---
+
+## Local media generation (ComfyUI)
+
+Spark can generate **images** and **music** on the same machine via [ComfyUI](https://github.com/comfyanonymous/ComfyUI) (default API `http://127.0.0.1:8188`). This path is preferred over Hermes for simple local generation when ComfyUI is running.
+
+### Models & templates
+
+Shipped API-format workflows (derived from [Comfy-Org/workflow_templates](https://github.com/Comfy-Org/workflow_templates)) live in `workflows/comfyui/`:
+
+| Workflow file | Upstream template | Models |
+|---------------|-------------------|--------|
+| `flux2_klein_t2i.json` | `image_flux2_klein_text_to_image` | [FLUX.2 Klein 4B](https://huggingface.co/Comfy-Org/flux2-klein) (`flux-2-klein-4b.safetensors`, `qwen_3_4b.safetensors`, `flux2-vae.safetensors`) |
+| `flux2_klein_edit.json` | `image_flux2_klein_image_edit_4b_distilled` | Klein edit (`flux-2-klein-4b-fp8.safetensors`, same CLIP/VAE) |
+| `ace_step_1_5_music.json` | `audio_ace_step1_5_xl_turbo` | [ACE-Step 1.5](https://huggingface.co/Comfy-Org/ace_step_1.5) (`acestep_v1.5_xl_turbo_bf16.safetensors`, `ace_1.5_vae.safetensors`, Qwen ACE CLIP pair) |
+
+Place weights under your ComfyUI install (`ComfyUI/models/diffusion_models`, `text_encoders`, `vae`, etc.) per each template’s model card. If node names differ on your build, export **API format** from ComfyUI and override paths with env vars below.
+
+### Launch ComfyUI on the Spark
+
+```bash
+cd ~/ComfyUI
+python main.py --listen 127.0.0.1 --port 8188
+```
+
+Install custom nodes / ACE-Step & FLUX.2 Klein support as required by your ComfyUI version (see Comfy-Org docs and the template README links).
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `COMFYUI_URL` | `http://127.0.0.1:8188` | ComfyUI HTTP API base |
+| `COMFYUI_ENABLED` | auto (`true` unless `false`) | Master switch; reachability checked at runtime |
+| `COMFYUI_TIMEOUT` | `600` | Job timeout (seconds) |
+| `COMFYUI_DEFAULT_WIDTH` / `HEIGHT` | `1024` | Image defaults |
+| `COMFYUI_DEFAULT_STEPS` | `4` | Klein distilled step default |
+| `COMFYUI_FLUX_T2I_WORKFLOW` | `workflows/comfyui/flux2_klein_t2i.json` | Override T2I API workflow |
+| `COMFYUI_FLUX_EDIT_WORKFLOW` | `workflows/comfyui/flux2_klein_edit.json` | Override edit workflow |
+| `COMFYUI_ACE_WORKFLOW` | `workflows/comfyui/ace_step_1_5_music.json` | Override music workflow |
+| `COMFYUI_FLUX_UNET` / `FLUX_EDIT_UNET` / `FLUX_CLIP` / `FLUX_VAE` | see `config.py` | Model filename overrides |
+| `COMFYUI_ACE_UNET` / `ACE_VAE` | ACE turbo + VAE defaults | Music model overrides |
+
+### Node title convention
+
+Spark injects prompts, seeds, sizes, and durations by `_meta.title` on API workflows (not hardcoded node IDs). See `workflows/comfyui/README.md` for titles such as `PROMPT`, `SEED`, `WIDTH`, `INPUT_IMAGE`, `TAGS`, `DURATION`.
+
+### Voice tools
+
+Enable in Settings → **generate_image**, **edit_image**, **generate_music**. Outputs land in `workspace/media/` and appear in the Hermes panel **Artifacts** tab (image preview + audio player). Progress events show under **Activity**.
+
+### REST: `POST /api/media/generate` (Hermes / HTTP)
+
+Hermes or other agents can call Spark directly (same host):
+
+```bash
+# Text-to-image
+curl -sk -X POST https://127.0.0.1:9443/api/media/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"kind":"image","prompt":"A vaporwave fox logo, flat vector","width":1024,"height":1024}'
+
+# Image edit (workspace-relative source)
+curl -sk -X POST https://127.0.0.1:9443/api/media/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"kind":"edit","prompt":"Make the sky sunset orange","source":"media/my_photo.png"}'
+
+# Music (ACE-Step tags + optional lyrics)
+curl -sk -X POST https://127.0.0.1:9443/api/media/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"kind":"music","tags":"Chillhop, 85 BPM, warm keys","lyrics":"","duration_seconds":45}'
+```
+
+Register as a Hermes tool with HTTP POST to `https://<spark-host>:9443/api/media/generate`, or call from skills via `curl`/HTTP client. Responses include `path` (workspace-relative) on success.
+
+> **Note**: Bundled ACE/music workflows are best-effort API exports from official UI templates. If ComfyUI rejects a prompt, replace the JSON with your own **Save (API Format)** export and point `COMFYUI_*_WORKFLOW` at it.
 
 ---
 

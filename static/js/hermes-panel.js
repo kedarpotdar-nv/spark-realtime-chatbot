@@ -28,6 +28,11 @@ async function fetchHermesStatus() {
     if (Array.isArray(data.artifacts)) {
       workspaceArtifacts = data.artifacts;
     }
+    if (data.comfyui && Array.isArray(data.comfyui.jobs)) {
+      data.comfyui.jobs.forEach((j) => {
+        if (j && j.job_id) comfyJobs[j.job_id] = j;
+      });
+    }
     renderHermesPanel();
   } catch (e) {
     log(`Hermes status poll notice: ${e.message}`);
@@ -45,6 +50,22 @@ function switchAgentTab(tab) {
   if (tabArtifacts) tabArtifacts.classList.toggle('active', tab === 'artifacts');
   if (viewActivity) viewActivity.style.display = tab === 'activity' ? 'flex' : 'none';
   if (viewArtifacts) viewArtifacts.style.display = tab === 'artifacts' ? 'flex' : 'none';
+}
+
+function handleComfyProgress(payload) {
+  if (!payload || !payload.job_id) return;
+  comfyJobs[payload.job_id] = { ...comfyJobs[payload.job_id], ...payload };
+  setSystemState('agent_working', 'ComfyUI');
+  renderHermesPanel();
+}
+
+function handleMediaReady(payload) {
+  if (!payload) return;
+  if (payload.job_id && comfyJobs[payload.job_id]) {
+    comfyJobs[payload.job_id] = { ...comfyJobs[payload.job_id], ...payload, status: payload.success === false ? 'failed' : 'completed' };
+  }
+  if (!isTtsPlaying) setSystemState('idle');
+  renderHermesPanel();
 }
 
 function handleHermesEvent(payload) {
@@ -131,7 +152,13 @@ function renderHermesPanel() {
   const artifactsListEl = document.getElementById('workspaceArtifactsList');
 
   const taskList = Object.values(hermesTasks).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
-  const activeCount = taskList.filter((t) => t.status === 'running' || t.status === 'queued').length;
+  const comfyList = Object.values(comfyJobs).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  const combinedActivity = [
+    ...taskList.map((t) => ({ type: 'hermes', item: t, created_at: t.created_at || 0 })),
+    ...comfyList.map((j) => ({ type: 'comfy', item: j, created_at: j.created_at || 0 })),
+  ].sort((a, b) => b.created_at - a.created_at);
+  const activeCount = taskList.filter((t) => t.status === 'running' || t.status === 'queued').length
+    + comfyList.filter((j) => j.status === 'running' || j.status === 'queued').length;
 
   if (badgeEl) {
     if (activeCount > 0) {
@@ -148,11 +175,11 @@ function renderHermesPanel() {
     }
   }
 
-  if (countActivityEl) countActivityEl.textContent = String(taskList.length);
+  if (countActivityEl) countActivityEl.textContent = String(combinedActivity.length);
   if (countArtifactsEl) countArtifactsEl.textContent = String(workspaceArtifacts.length);
 
   if (tasksListEl) {
-    if (taskList.length === 0) {
+    if (combinedActivity.length === 0) {
       const hint = hermesStatus.configured
         ? 'Delegate coding, research, or app-building tasks by voice or via the bar above.'
         : 'Set HERMES_URL=http://127.0.0.1:8642 or HERMES_ENABLED=true to enable background delegation.';
@@ -163,7 +190,39 @@ function renderHermesPanel() {
         </div>
       `;
     } else {
-      tasksListEl.innerHTML = taskList.map((task) => {
+      tasksListEl.innerHTML = combinedActivity.map((entry) => {
+        if (entry.type === 'comfy') {
+          const job = entry.item;
+          const status = job.status || 'queued';
+          const isRunning = status === 'running' || status === 'queued';
+          const prog = job.progress;
+          const progText = prog && prog.max ? `${prog.value || 0}/${prog.max} (${prog.percent || 0}%)` : '';
+          return `
+            <div class="hermes-task-card ${isRunning ? 'running' : ''}" data-job-id="${escapeHtml(job.job_id)}">
+              <div class="hermes-task-header">
+                <div style="min-width:0;flex:1;">
+                  <div class="hermes-task-title">${escapeHtml(job.label || job.kind || 'ComfyUI')}</div>
+                  <div class="hermes-task-meta">
+                    <span class="task-status-tag ${escapeHtml(status)}">${escapeHtml(status)}</span>
+                    <span>comfyui · ${escapeHtml(job.kind || 'media')}</span>
+                    ${progText ? `<span>${escapeHtml(progText)}</span>` : ''}
+                  </div>
+                </div>
+                <span style="color:var(--accent);display:inline-flex;">${window.SparkIcons.iconSvg(job.kind === 'music' ? 'music' : 'image', 14)}</span>
+              </div>
+              ${job.error ? `<div style="padding:8px 12px;font-size:12px;color:var(--danger);">${escapeHtml(job.error)}</div>` : ''}
+              ${job.artifact ? `
+                <div class="hermes-task-artifacts">
+                  <button type="button" class="artifact-chip" onclick="previewWorkspaceArtifact(${JSON.stringify(job.artifact)})">
+                    ${window.SparkIcons.iconSvg('file-image', 12)}
+                    <span>${escapeHtml(job.artifact)}</span>
+                  </button>
+                </div>
+              ` : ''}
+            </div>
+          `;
+        }
+        const task = entry.item;
         const status = task.status || 'queued';
         const isRunning = status === 'running' || status === 'queued';
         const steps = (task.steps || []).slice(-6);
@@ -243,12 +302,22 @@ function renderHermesPanel() {
     } else {
       artifactsListEl.innerHTML = workspaceArtifacts.map((art) => {
         const kb = art.size < 1024 ? `${art.size} B` : `${(art.size / 1024).toFixed(1)} KB`;
-        const isHtml = art.name.endsWith('.html') || art.name.endsWith('.htm');
-        const iconName = isHtml ? 'globe' : (art.name.endsWith('.md') ? 'file-text' : 'file-code');
+        const lower = art.name.toLowerCase();
+        const isHtml = lower.endsWith('.html') || lower.endsWith('.htm');
+        const isImage = /\.(png|jpe?g|webp|gif|svg)$/i.test(art.name);
+        const isAudio = /\.(mp3|wav|flac|ogg)$/i.test(art.name);
+        const iconName = isImage ? 'image' : (isAudio ? 'music' : (isHtml ? 'globe' : (lower.endsWith('.md') ? 'file-text' : 'file-code')));
         const pathEsc = escapeHtml(art.path);
         const pathJs = JSON.stringify(art.path);
+        const mediaUrl = `/workspace/${art.path.split('/').map(encodeURIComponent).join('/')}`;
+        const mediaPreview = isImage
+          ? `<button type="button" class="artifact-media-thumb" onclick="openMediaLightbox(${pathJs})" title="Open full size">
+              <img src="${mediaUrl}" alt="" loading="lazy" />
+            </button>`
+          : (isAudio ? `<div class="artifact-audio-wrap">${buildArtifactAudioPlayer(mediaUrl)}</div>` : '');
         return `
-          <div class="artifact-row">
+          <div class="artifact-row ${isImage || isAudio ? 'artifact-row-media' : ''}">
+            ${mediaPreview}
             <div class="artifact-row-main" onclick="previewWorkspaceArtifact(${pathJs})" style="cursor:pointer;min-width:0;flex:1;">
               <span style="color:var(--accent);display:inline-flex;">${window.SparkIcons.iconSvg(iconName, 14)}</span>
               <span class="artifact-row-name">${pathEsc}</span>
@@ -374,12 +443,65 @@ async function cancelHermesTask(taskId) {
   }
 }
 
+function buildArtifactAudioPlayer(srcUrl) {
+  const id = `audio-${Math.random().toString(36).slice(2, 9)}`;
+  return `
+    <div class="spark-audio-player">
+      <audio id="${id}" preload="metadata" src="${escapeHtml(srcUrl)}"></audio>
+      <button type="button" class="spark-audio-play" onclick="toggleSparkAudio('${id}', this)" aria-label="Play">
+        ${window.SparkIcons.iconSvg('play', 14)}
+      </button>
+      <div class="spark-audio-track"><span class="spark-audio-fill"></span></div>
+      <span class="spark-audio-time">0:00</span>
+    </div>
+  `;
+}
+
+function toggleSparkAudio(audioId, btn) {
+  const audio = document.getElementById(audioId);
+  if (!audio) return;
+  if (audio.paused) {
+    audio.play();
+    btn.innerHTML = window.SparkIcons.iconSvg('pause', 14);
+  } else {
+    audio.pause();
+    btn.innerHTML = window.SparkIcons.iconSvg('play', 14);
+  }
+}
+
+function openMediaLightbox(relPath) {
+  if (!relPath) return;
+  const url = `/workspace/${relPath.split('/').map(encodeURIComponent).join('/')}`;
+  const overlay = document.createElement('div');
+  overlay.className = 'media-lightbox';
+  overlay.innerHTML = `
+    <div class="media-lightbox-inner">
+      <button type="button" class="icon-btn media-lightbox-close" aria-label="Close">${window.SparkIcons.iconSvg('x', 16)}</button>
+      <img src="${url}" alt="" class="media-lightbox-img" />
+    </div>
+  `;
+  overlay.querySelector('.media-lightbox-close')?.addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
 async function previewWorkspaceArtifact(relPath) {
   try {
     const res = await fetch(`/api/workspace/file?path=${encodeURIComponent(relPath)}`);
     const data = await res.json();
     if (!data.success || !data.file) return;
     const file = data.file;
+    if (file.binary && file.workspace_url) {
+      const ext = (file.extension || '').toLowerCase();
+      if (/\.(png|jpe?g|webp|gif)$/i.test(ext)) {
+        openMediaLightbox(file.path);
+        return;
+      }
+      if (/\.(mp3|wav|flac|ogg)$/i.test(ext)) {
+        switchAgentTab('artifacts');
+        return;
+      }
+    }
     if (file.extension === '.html' || file.extension === '.htm') {
       openHtmlEditor(file.path);
       htmlContent = file.content;

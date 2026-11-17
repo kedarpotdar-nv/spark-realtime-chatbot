@@ -451,6 +451,27 @@
           <div class="settings-label"><span>Background Agents &amp; Tools</span></div>
           <div class="checkbox-grid">
             <label class="checkbox-card">
+              <input type="checkbox" id="toolGenerateImage" data-tool-checkbox value="generate_image" checked />
+              <div>
+                <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">ComfyUI Image (FLUX.2 Klein)</div>
+                <div style="font-size:11.5px;color:var(--text-muted);">Local text-to-image via <code>generate_image</code></div>
+              </div>
+            </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="toolEditImage" data-tool-checkbox value="edit_image" checked />
+              <div>
+                <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">ComfyUI Image Edit</div>
+                <div style="font-size:11.5px;color:var(--text-muted);">Camera / workspace edits via <code>edit_image</code></div>
+              </div>
+            </label>
+            <label class="checkbox-card">
+              <input type="checkbox" id="toolGenerateMusic" data-tool-checkbox value="generate_music" checked />
+              <div>
+                <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">ComfyUI Music (ACE-Step 1.5)</div>
+                <div style="font-size:11.5px;color:var(--text-muted);">Local music via <code>generate_music</code></div>
+              </div>
+            </label>
+            <label class="checkbox-card">
               <input type="checkbox" id="agentHermesDelegate" data-tool-checkbox value="delegate_task" checked />
               <div>
                 <div style="font-weight:600;font-size:12.5px;color:var(--text-primary);">Hermes Agent Bridge</div>

@@ -70,6 +70,7 @@ let hermesStatus = {
   active_count: 0
 };
 let hermesTasks = {};
+let comfyJobs = {};
 let workspaceArtifacts = [];
 let activeAgentTab = 'activity';
 

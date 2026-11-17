@@ -24,11 +24,13 @@ from starlette.websockets import WebSocketState
 # Local modules
 from config import (
     ASRConfig, LLMConfig, VLMConfig, NemotronConfig, TTSConfig, ServerConfig, HermesConfig,
-    PersonalFSConfig,
+    PersonalFSConfig, ComfyUIConfig,
     AUDIO_DIR, STATIC_DIR, SAMPLE_RATE, WORKSPACE_ROOT, AGENT_WORKSPACE_DIR, FFMPEG_PATH
 )
 from audio import check_ffmpeg_available, decode_webm_bytes_to_pcm_f32
-from tools import get_enabled_tools, execute_tool, PERSONAL_TOOL_IDS, AGENT_TOOL_IDS
+from tools import get_enabled_tools, execute_tool, PERSONAL_TOOL_IDS, AGENT_TOOL_IDS, COMFY_TOOL_IDS
+from clients.comfy_runner import run_comfy_job, list_comfy_jobs, resolve_edit_source_for_session
+from clients.comfyui import comfyui_available
 from agents import get_hermes_bridge, AgentEvent
 from clients import (
     HTTPSessionManager,
@@ -118,6 +120,13 @@ async def lifespan(app: FastAPI):
         f"roots={len(personal_cfg.roots)}"
     )
 
+    comfy_cfg = ComfyUIConfig()
+    if comfy_cfg.enabled:
+        up = await comfyui_available()
+        print(f"[ComfyUI] enabled={comfy_cfg.enabled} url={comfy_cfg.url} reachable={up}")
+    else:
+        print("[ComfyUI] disabled (COMFYUI_ENABLED=false)")
+
     yield
     # Cleanup: close shared HTTP session
     if http_manager:
@@ -167,16 +176,102 @@ async def get_default_prompt():
     }
 
 
+async def _broadcast_ws_message(msg_type: str, data: Dict[str, Any]) -> None:
+    for ws_session in list(active_voice_sessions):
+        try:
+            await ws_session.send_message(msg_type, data)
+        except Exception:
+            pass
+
+
+async def _notify_comfy_event(msg_type: str, data: Dict[str, Any]) -> None:
+    await _broadcast_ws_message(msg_type, data)
+    if msg_type == "media_ready" and data.get("path"):
+        bridge = get_hermes_bridge()
+        await _broadcast_ws_message("workspace_updated", {
+            "artifacts": [a.to_dict() for a in bridge.list_artifacts()[:50]],
+        })
+        await _broadcast_ws_message("artifact_ready", {
+            "path": data.get("path"),
+            "job_id": data.get("job_id"),
+        })
+
+
 @app.get("/api/agents/status")
 async def get_agents_status():
     """Return status and configuration of Hermes Agent and built-in tools."""
     bridge = get_hermes_bridge()
     hermes_status = await bridge.check_status()
+    comfy_up = await comfyui_available() if ComfyUIConfig().enabled else False
     return {
         "hermes": hermes_status,
+        "comfyui": {
+            "enabled": ComfyUIConfig().enabled,
+            "url": ComfyUIConfig().url,
+            "reachable": comfy_up,
+            "jobs": list_comfy_jobs()[:25],
+        },
         "tasks": [t.to_dict() for t in bridge.list_tasks()[:25]],
         "artifacts": [a.to_dict() for a in bridge.list_artifacts()[:50]],
     }
+
+
+@app.post("/api/media/generate")
+async def api_media_generate(request: Request):
+    """Generate image, edit, or music via local ComfyUI (for Hermes / HTTP clients)."""
+    data = await request.json()
+    kind = (data.get("kind") or "").strip().lower()
+    if kind not in ("image", "edit", "music"):
+        return {"success": False, "error": "kind must be image, edit, or music"}
+
+    async def resolve_edit_api(src: str):
+        src_l = (src or "").strip().lower()
+        if src_l in ("camera", "webcam"):
+            raise ValueError("camera source requires an active voice session; use image_b64 or a workspace path")
+        if data.get("image_b64"):
+            from clients.comfy_media import decode_b64_image as _dec
+            return _dec(data["image_b64"]), str(data.get("filename") or "upload.png")
+
+        class _Tmp:
+            latest_camera_frame_b64 = None
+            last_generated_image_path = data.get("last_image_path")
+
+        return await resolve_edit_source_for_session(_Tmp(), src or data.get("source_path", ""))
+
+    params: Dict[str, Any] = {}
+    if kind == "image":
+        params["prompt"] = (data.get("prompt") or "").strip()
+        if not params["prompt"]:
+            return {"success": False, "error": "prompt is required"}
+        params.update({k: data.get(k) for k in ("width", "height", "seed", "steps") if data.get(k) is not None})
+    elif kind == "edit":
+        params["prompt"] = (data.get("prompt") or "").strip()
+        params["source"] = (data.get("source") or data.get("source_path") or "").strip()
+        if not params["prompt"]:
+            return {"success": False, "error": "prompt is required"}
+        if not params["source"] and not data.get("image_b64"):
+            return {"success": False, "error": "source workspace path or image_b64 required"}
+        params.update({k: data.get(k) for k in ("width", "height", "seed", "steps") if data.get(k) is not None})
+    else:
+        params["tags"] = (data.get("tags") or data.get("prompt") or "").strip()
+        if not params["tags"]:
+            return {"success": False, "error": "tags (style prompt) is required"}
+        params["lyrics"] = (data.get("lyrics") or "").strip()
+        if data.get("duration_seconds") is not None:
+            params["duration_seconds"] = data.get("duration_seconds")
+        if data.get("seed") is not None:
+            params["seed"] = data.get("seed")
+
+    async def _noop_source(_src: str):
+        raise RuntimeError("edit source resolver not used for this kind")
+
+    result = await run_comfy_job(
+        kind=kind,
+        params=params,
+        notify=_notify_comfy_event,
+        resolve_edit_source=resolve_edit_api if kind == "edit" else _noop_source,
+    )
+    return result
 
 
 @app.get("/api/agents/tasks")
@@ -438,6 +533,8 @@ class VoiceSession:
         self.hermes_identity = os.getenv("SPARK_USER_ID", "default").strip() or "default"
         self.camera_active = False
         self.latest_camera_frame_b64: Optional[str] = None
+        self.last_generated_image_path: Optional[str] = None
+        self._comfy_tasks: Dict[str, asyncio.Task] = {}
         # Initialize conversation history AFTER system_prompt is defined
         self.conversation_history: List[Dict[str, str]] = [
             {
@@ -926,7 +1023,7 @@ class VoiceSession:
                                 if fn_name in AGENT_TOOL_IDS or fn_name in (
                                     "delegate_task", "hermes_agent", "markdown_assistant",
                                     "html_assistant", "reasoning_assistant",
-                                ):
+                                ) or fn_name in COMFY_TOOL_IDS:
                                     is_agent_tool = True
                                 if fn_name in PERSONAL_TOOL_IDS:
                                     is_personal_tool = True
@@ -936,6 +1033,14 @@ class VoiceSession:
                                     fn_name = tc.get("function", {}).get("name")
                                     if fn_name == "reasoning_assistant":
                                         feedback_msg = "Let me think through this."
+                                        break
+                                    elif fn_name in COMFY_TOOL_IDS:
+                                        if fn_name == "generate_music":
+                                            feedback_msg = "On it — composing that locally."
+                                        elif fn_name == "edit_image":
+                                            feedback_msg = "Got it — editing that image locally."
+                                        else:
+                                            feedback_msg = "On it — generating that image locally."
                                         break
                                     elif fn_name in ("delegate_task", "hermes_agent"):
                                         # Cue creative handoffs (image/music) with a clearer ack
@@ -1033,6 +1138,8 @@ class VoiceSession:
                             agent_context = ""
                             agent_category = "general"
                             agent_include_camera = True
+                            comfy_tool_name = None
+                            comfy_arguments: Dict[str, Any] = {}
                             for tool_result in tool_results:
                                 try:
                                     result_data = json.loads(tool_result.get("content", "{}"))
@@ -1044,9 +1151,20 @@ class VoiceSession:
                                         agent_category = result_data.get("category", "general")
                                         if "include_camera" in result_data:
                                             agent_include_camera = bool(result_data.get("include_camera"))
+                                        if agent_type == "comfy_media":
+                                            comfy_tool_name = result_data.get("tool")
+                                            comfy_arguments = result_data.get("arguments") or {}
                                         break
                                 except json.JSONDecodeError:
                                     pass
+
+                            if is_agent_tool and agent_type == "comfy_media" and comfy_tool_name:
+                                await self.dispatch_comfy_media(
+                                    comfy_tool_name,
+                                    comfy_arguments,
+                                    speak_ack=False,
+                                )
+                                return
 
                             # Background Hermes delegation: dispatch immediately without blocking voice loop
                             if is_agent_tool and agent_type == "hermes_agent":
@@ -1582,6 +1700,70 @@ Output the complete HTML code."""
         )
         return agent_task
 
+    async def dispatch_comfy_media(self, tool_name: str, arguments: Dict[str, Any], *, speak_ack: bool = True):
+        """Run a ComfyUI generation job in the background and stream progress to the client."""
+        kind_map = {
+            "generate_image": "image",
+            "edit_image": "edit",
+            "generate_music": "music",
+        }
+        kind = kind_map.get(tool_name)
+        if not kind:
+            return None
+
+        if speak_ack:
+            if kind == "music":
+                ack = "On it — composing that locally in ComfyUI."
+            elif kind == "edit":
+                ack = "Got it — editing that image in ComfyUI."
+            else:
+                ack = "On it — generating that image locally in ComfyUI."
+            self.conversation_history.append({"role": "assistant", "content": ack})
+            await self.send_message("final_response", {"text": ack})
+            await self.stream_tts(ack, is_transient=True)
+
+        params = dict(arguments)
+        if kind == "music" and "tags" not in params and params.get("prompt"):
+            params["tags"] = params["prompt"]
+
+        async def notify(msg_type: str, payload: Dict[str, Any]) -> None:
+            await self.send_message(msg_type, payload)
+            if msg_type == "media_ready" and payload.get("path"):
+                bridge = get_hermes_bridge()
+                rel = payload.get("path")
+                if rel and str(rel).lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                    self.last_generated_image_path = rel
+                await self.send_message("workspace_updated", {
+                    "artifacts": [a.to_dict() for a in bridge.list_artifacts()[:50]],
+                })
+
+        async def _run():
+            result = await run_comfy_job(
+                kind=kind,
+                params=params,
+                notify=notify,
+                resolve_edit_source=lambda src: resolve_edit_source_for_session(self, src),
+            )
+            if result.get("success"):
+                path = result.get("path", "")
+                if kind in ("image", "edit") and path:
+                    summary = f"Your image is ready in the workspace as {path}."
+                elif kind == "music" and path:
+                    summary = f"Your track is ready in the workspace as {path}."
+                else:
+                    summary = "Media generation finished."
+            else:
+                summary = result.get("error") or "ComfyUI could not finish that job."
+            await self.send_message("media_ready", {"summary": summary, **{k: result.get(k) for k in ("path", "job_id", "success")}})
+            if result.get("success"):
+                await self.stream_tts(summary, is_transient=False)
+            else:
+                await self.send_message("error", {"error": summary})
+
+        task = asyncio.create_task(_run())
+        self._comfy_tasks[tool_name] = task
+        return task
+
     async def handle_hermes_event(self, evt: AgentEvent):
         """Forward a Hermes Agent background event to the client WebSocket and speak summary on completion."""
         payload = evt.to_dict()
@@ -2072,7 +2254,17 @@ async def voice_call(websocket: WebSocket):
                                             print(f"[Video Call] Tool '{tool_name}' args: {args}")
 
                                             # Execute tool
-                                            if tool_name in ("delegate_task", "hermes_agent"):
+                                            if tool_name in COMFY_TOOL_IDS:
+                                                if tool_name == "generate_music":
+                                                    ack = "On it — composing that locally in ComfyUI."
+                                                elif tool_name == "edit_image":
+                                                    ack = "Got it — editing that image in ComfyUI."
+                                                else:
+                                                    ack = "On it — generating that image locally in ComfyUI."
+                                                await session.send_message("llm_final", {"text": ack})
+                                                await session.stream_tts(ack, is_transient=True)
+                                                await session.dispatch_comfy_media(tool_name, args, speak_ack=False)
+                                            elif tool_name in ("delegate_task", "hermes_agent"):
                                                 cat = str(args.get("category") or "general").lower()
                                                 task_l = str(args.get("task") or "").lower()
                                                 creative_hints = (

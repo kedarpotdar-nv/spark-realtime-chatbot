@@ -199,6 +199,77 @@ def _parse_personal_fs_roots() -> list[Path]:
     return roots or _default_personal_fs_roots()
 
 
+def _default_comfyui_enabled() -> bool:
+    raw = os.getenv("COMFYUI_ENABLED", "").strip().lower()
+    if raw in ("false", "0", "no", "off"):
+        return False
+    if raw in ("true", "1", "yes", "on"):
+        return True
+    # "auto" — treated as enabled; reachability checked at runtime
+    return True
+
+
+@dataclass
+class ComfyUIConfig:
+    """Local ComfyUI media generation (FLUX.2 Klein + ACE-Step 1.5)."""
+    url: str = field(default_factory=lambda: os.getenv("COMFYUI_URL", "http://127.0.0.1:8188").strip())
+    enabled: bool = field(default_factory=_default_comfyui_enabled)
+    timeout_seconds: float = field(default_factory=lambda: float(os.getenv("COMFYUI_TIMEOUT", "600")))
+    default_width: int = field(default_factory=lambda: int(os.getenv("COMFYUI_DEFAULT_WIDTH", "1024")))
+    default_height: int = field(default_factory=lambda: int(os.getenv("COMFYUI_DEFAULT_HEIGHT", "1024")))
+    default_steps: int = field(default_factory=lambda: int(os.getenv("COMFYUI_DEFAULT_STEPS", "4")))
+    workflow_t2i: str = field(
+        default_factory=lambda: os.getenv(
+            "COMFYUI_FLUX_T2I_WORKFLOW",
+            str(Path(__file__).resolve().parent / "workflows" / "comfyui" / "flux2_klein_t2i.json"),
+        )
+    )
+    workflow_edit: str = field(
+        default_factory=lambda: os.getenv(
+            "COMFYUI_FLUX_EDIT_WORKFLOW",
+            str(Path(__file__).resolve().parent / "workflows" / "comfyui" / "flux2_klein_edit.json"),
+        )
+    )
+    workflow_music: str = field(
+        default_factory=lambda: os.getenv(
+            "COMFYUI_ACE_WORKFLOW",
+            str(Path(__file__).resolve().parent / "workflows" / "comfyui" / "ace_step_1_5_music.json"),
+        )
+    )
+    flux_unet: str = field(
+        default_factory=lambda: os.getenv("COMFYUI_FLUX_UNET", "flux-2-klein-4b.safetensors")
+    )
+    flux_clip: str = field(
+        default_factory=lambda: os.getenv("COMFYUI_FLUX_CLIP", "qwen_3_4b.safetensors")
+    )
+    flux_vae: str = field(
+        default_factory=lambda: os.getenv("COMFYUI_FLUX_VAE", "flux2-vae.safetensors")
+    )
+    flux_edit_unet: str = field(
+        default_factory=lambda: os.getenv("COMFYUI_FLUX_EDIT_UNET", "flux-2-klein-4b-fp8.safetensors")
+    )
+    ace_unet: str = field(
+        default_factory=lambda: os.getenv("COMFYUI_ACE_UNET", "acestep_v1.5_xl_turbo_bf16.safetensors")
+    )
+    ace_vae: str = field(
+        default_factory=lambda: os.getenv("COMFYUI_ACE_VAE", "ace_1.5_vae.safetensors")
+    )
+
+    @property
+    def media_dir(self) -> Path:
+        return (AGENT_WORKSPACE_DIR / "media").resolve()
+
+    def model_overrides_flux(self, *, edit: bool = False) -> dict[str, str]:
+        return {
+            "unet": self.flux_edit_unet if edit else self.flux_unet,
+            "clip": self.flux_clip,
+            "vae": self.flux_vae,
+        }
+
+    def model_overrides_ace(self) -> dict[str, str]:
+        return {"unet": self.ace_unet, "vae": self.ace_vae}
+
+
 @dataclass
 class PersonalFSConfig:
     """Personal filesystem / shell tools (Jarvis local mode, no Docker sandbox)."""
