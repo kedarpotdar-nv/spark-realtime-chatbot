@@ -356,6 +356,18 @@ async function handleMessage(data) {
       handleHermesSummary(data);
       break;
 
+    case 'comfy_progress':
+      if (typeof handleComfyProgress === 'function') handleComfyProgress(data);
+      break;
+
+    case 'media_ready':
+      if (typeof handleMediaReady === 'function') handleMediaReady(data);
+      if (data.path) {
+        switchAgentTab('artifacts');
+        renderHermesPanel();
+      }
+      break;
+
     case 'workspace_updated':
       if (Array.isArray(data.artifacts)) {
         workspaceArtifacts = data.artifacts;
