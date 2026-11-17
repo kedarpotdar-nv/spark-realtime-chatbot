@@ -37,6 +37,7 @@ env/
 # Project specific
 audio_cache/
 workspace/
+workspace/.hermes_sessions.json
 *.wav
 *.webm
 *.mp3
