@@ -8,6 +8,83 @@ from config import PersonalFSConfig
 
 # Available tools (OpenAI format) - registry of all possible tools
 ALL_TOOLS = {
+    # Local ComfyUI media generation (FLUX.2 Klein + ACE-Step 1.5)
+    "generate_image": {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": (
+                "Generate an image locally via ComfyUI (FLUX.2 Klein). "
+                "Use when the user wants a new picture, illustration, or artwork. "
+                "Runs in the background while you keep talking."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Detailed image prompt."},
+                    "width": {"type": "integer", "description": "Width in pixels (default 1024)."},
+                    "height": {"type": "integer", "description": "Height in pixels (default 1024)."},
+                    "seed": {"type": "integer", "description": "Optional seed for reproducibility."},
+                    "steps": {"type": "integer", "description": "Diffusion steps (Klein distilled default ~4)."},
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    "edit_image": {
+        "type": "function",
+        "function": {
+            "name": "edit_image",
+            "description": (
+                "Edit an image with FLUX.2 Klein (image + prompt). "
+                "Source can be the live camera frame, the last generated image, or a workspace file path."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Describe the edit to apply."},
+                    "source": {
+                        "type": "string",
+                        "description": (
+                            "camera | last_image | workspace-relative path (e.g. media/foo.png)"
+                        ),
+                    },
+                    "width": {"type": "integer"},
+                    "height": {"type": "integer"},
+                    "seed": {"type": "integer"},
+                    "steps": {"type": "integer"},
+                },
+                "required": ["prompt", "source"],
+            },
+        },
+    },
+    "generate_music": {
+        "type": "function",
+        "function": {
+            "name": "generate_music",
+            "description": (
+                "Generate music locally via ComfyUI ACE-Step 1.5 (tags/style + optional lyrics). "
+                "Runs in the background."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tags": {
+                        "type": "string",
+                        "description": "Style tags, genre, BPM, mood (ACE-Step tags prompt).",
+                    },
+                    "lyrics": {"type": "string", "description": "Optional lyrics."},
+                    "duration_seconds": {
+                        "type": "number",
+                        "description": "Length in seconds (default 60).",
+                    },
+                    "seed": {"type": "integer"},
+                },
+                "required": ["tags"],
+            },
+        },
+    },
+
     # Hermes Agent background delegation tool
     "delegate_task": {
         "type": "function",
@@ -271,12 +348,19 @@ PERSONAL_TOOL_IDS: Set[str] = {
     "open_path",
 }
 
+COMFY_TOOL_IDS: Set[str] = {
+    "generate_image",
+    "edit_image",
+    "generate_music",
+}
+
 AGENT_TOOL_IDS: Set[str] = {
     "delegate_task",
     "hermes_agent",
     "markdown_assistant",
     "html_assistant",
     "reasoning_assistant",
+    *COMFY_TOOL_IDS,
 }
 
 
@@ -288,11 +372,18 @@ def _personal_tool_allowed(tool_id: str, cfg: PersonalFSConfig) -> bool:
     return tool_id in PERSONAL_TOOL_IDS
 
 
+def _comfy_tools_enabled() -> bool:
+    from config import ComfyUIConfig
+
+    return bool(ComfyUIConfig().enabled)
+
+
 def get_enabled_tools(enabled_tool_ids: List[str]) -> List[Dict[str, Any]]:
     """Get list of tool definitions for enabled tool IDs."""
     tools = []
     seen = set()
     personal_cfg = PersonalFSConfig()
+    comfy_on = _comfy_tools_enabled()
     for tool_id in enabled_tool_ids:
         # Support both 'hermes_agent' and 'delegate_task' aliases
         canonical_id = "delegate_task" if tool_id in ("hermes_agent", "delegate_task") else tool_id
@@ -309,6 +400,8 @@ def get_enabled_tools(enabled_tool_ids: List[str]) -> List[Dict[str, Any]]:
                     pass
             if canonical_id in PERSONAL_TOOL_IDS and not _personal_tool_allowed(canonical_id, personal_cfg):
                 continue
+            if canonical_id in COMFY_TOOL_IDS and not comfy_on:
+                continue
             tools.append(ALL_TOOLS[canonical_id])
             seen.add(canonical_id)
     return tools
@@ -316,6 +409,14 @@ def get_enabled_tools(enabled_tool_ids: List[str]) -> List[Dict[str, Any]]:
 
 async def execute_tool(tool_name: str, arguments: Dict[str, Any]) -> str:
     """Execute a tool and return the result as a string."""
+    if tool_name in COMFY_TOOL_IDS:
+        return json.dumps({
+            "agent_type": "comfy_media",
+            "tool": tool_name,
+            "arguments": arguments,
+            "status": "dispatched",
+        })
+
     if tool_name in ("delegate_task", "hermes_agent"):
         task = arguments.get("task", "")
         context = arguments.get("context", "")
