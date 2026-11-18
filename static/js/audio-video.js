@@ -173,6 +173,20 @@ async function withMicFallback(initFn) {
   }
 }
 
+function releaseMicVad(instance) {
+  if (!instance) return;
+  try { instance.pause(); } catch (e) {}
+  try {
+    if (typeof instance.destroy === 'function') instance.destroy();
+  } catch (e) {}
+  try {
+    if (instance.stream) instance.stream.getTracks().forEach((track) => track.stop());
+  } catch (e) {}
+  try {
+    if (instance.audioContext && instance.audioContext.state !== 'closed') instance.audioContext.close();
+  } catch (e) {}
+}
+
 async function applyMicToActiveSessions() {
   if (!voiceCallActive && !videoCallActive && !pttStream) return;
 
@@ -183,7 +197,7 @@ async function applyMicToActiveSessions() {
 
   if (voiceCallActive) {
     if (vadInstance) {
-      try { vadInstance.pause(); vadInstance.destroy(); } catch (e) {}
+      releaseMicVad(vadInstance);
       vadInstance = null;
     }
     try {
@@ -196,7 +210,7 @@ async function applyMicToActiveSessions() {
 
   if (videoCallActive) {
     if (videoCallVadInstance) {
-      try { videoCallVadInstance.pause(); videoCallVadInstance.destroy(); } catch (e) {}
+      releaseMicVad(videoCallVadInstance);
       videoCallVadInstance = null;
     }
     try {
@@ -694,7 +708,7 @@ function teardownVoiceCallMode() {
   isCurrentlySpeaking = false;
   stopTtsPlayback();
   if (vadInstance) {
-    try { vadInstance.pause(); vadInstance.destroy(); } catch (e) {}
+    releaseMicVad(vadInstance);
     vadInstance = null;
   }
   const container = document.getElementById('voiceCallContainer');
@@ -878,7 +892,7 @@ function teardownVideoCallMode() {
   videoCallSpeaking = false;
   stopTtsPlayback();
   if (videoCallVadInstance) {
-    try { videoCallVadInstance.pause(); videoCallVadInstance.destroy(); } catch (e) {}
+    releaseMicVad(videoCallVadInstance);
     videoCallVadInstance = null;
   }
   if (videoCallStream) {
@@ -1068,6 +1082,10 @@ async function startRecording() {
     log('Push-to-talk recording started');
   } catch (err) {
     log(`Microphone access notice: ${err.message}`);
+    if (pttBtn) pttBtn.classList.remove('recording');
+    if (currentSystemState === 'listening' && !voiceCallActive && !videoCallActive) {
+      setSystemState('idle');
+    }
   }
 }
 

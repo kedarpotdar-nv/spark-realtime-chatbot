@@ -225,7 +225,7 @@ function finalizeChatMedia(job, info = {}) {
   const path = info.path || job.artifact || job.path || job.result?.path;
   if (!path) return;
   const kind = normalizeMediaKind(info.kind || job.kind, path);
-  const prompt = info.prompt || job.label || job.result?.prompt || job.result?.tags || job.summary || '';
+  const prompt = info.prompt || job.prompt || job.label || job.result?.prompt || job.result?.tags || job.summary || '';
   const media = { kind, path, prompt, job_id: job.job_id || '' };
   const existing = findChatMediaElement(job.job_id);
 
