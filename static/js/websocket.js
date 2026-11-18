@@ -402,7 +402,7 @@ async function handleMessage(data) {
 
     case 'media_ready':
       if (typeof handleMediaReady === 'function') handleMediaReady(data);
-      if (data.path) {
+      if (data.path && data.success !== false) {
         switchAgentTab('artifacts');
         renderHermesPanel();
       }

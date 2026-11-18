@@ -354,6 +354,30 @@
             <div class="chat-mode-card-desc">Live camera stream paired with Qwen3-VL vision &amp; face recognition</div>
           </div>
         </div>
+
+        <!-- Microphone selection and pre-session test -->
+        <div class="settings-group mic-settings-group">
+          <div class="settings-label">
+            <span>Microphone</span>
+            <span class="mic-test-status" data-mic-test-status>Ready</span>
+          </div>
+          <div class="mic-picker-row">
+            <select id="newSessionMicSelect" class="settings-select" data-mic-select aria-label="Microphone device">
+              <option value="">System default</option>
+            </select>
+            <button type="button" class="btn-secondary" onclick="refreshMicDeviceList(true)" title="Refresh microphone list" aria-label="Refresh microphone list">
+              <i data-lucide="refresh-cw" data-size="13"></i>
+            </button>
+            <button type="button" class="btn-secondary" data-mic-test-btn onclick="testMicrophone()" title="Test microphone" aria-label="Test microphone">
+              <i data-lucide="mic" data-size="13"></i>
+              <span>Test mic</span>
+            </button>
+          </div>
+          <div class="mic-test-meter" data-mic-test-meter aria-hidden="true">
+            <div class="mic-test-meter-fill"></div>
+          </div>
+          <div class="mic-test-hint">Records about 3 seconds and plays it back locally. Nothing is sent to the server.</div>
+        </div>
       </div>
 
       <div class="modal-footer">
@@ -500,6 +524,30 @@
               </div>
             </label>
           </div>
+        </div>
+
+        <!-- Microphone Selection & Test -->
+        <div class="settings-group mic-settings-group">
+          <div class="settings-label">
+            <span>Microphone</span>
+            <span class="mic-test-status" data-mic-test-status>Ready</span>
+          </div>
+          <div class="mic-picker-row">
+            <select id="settingsMicSelect" class="settings-select" data-mic-select aria-label="Microphone device">
+              <option value="">System default</option>
+            </select>
+            <button type="button" class="btn-secondary" onclick="refreshMicDeviceList(true)" title="Refresh microphone list" aria-label="Refresh microphone list">
+              <i data-lucide="refresh-cw" data-size="13"></i>
+            </button>
+            <button type="button" class="btn-secondary" data-mic-test-btn onclick="testMicrophone()" title="Test microphone" aria-label="Test microphone">
+              <i data-lucide="mic" data-size="13"></i>
+              <span>Test mic</span>
+            </button>
+          </div>
+          <div class="mic-test-meter" data-mic-test-meter aria-hidden="true">
+            <div class="mic-test-meter-fill"></div>
+          </div>
+          <div class="mic-test-hint">Records about 3 seconds and plays it back locally. Nothing is sent to the server.</div>
         </div>
 
         <!-- Audio / VAD Controls -->

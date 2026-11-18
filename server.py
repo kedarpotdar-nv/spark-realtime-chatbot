@@ -1801,7 +1801,12 @@ Output the complete HTML code."""
                     summary = "Media generation finished."
             else:
                 summary = result.get("error") or "ComfyUI could not finish that job."
-            await self.send_message("media_ready", {"summary": summary, **{k: result.get(k) for k in ("path", "job_id", "success")}})
+            await self.send_message("media_ready", {
+                "summary": summary,
+                **{k: result.get(k) for k in ("path", "job_id", "success")},
+                "kind": kind,
+                "prompt": params.get("prompt") or params.get("tags") or "",
+            })
             if result.get("success"):
                 await self.stream_tts(summary, is_transient=False)
             else:

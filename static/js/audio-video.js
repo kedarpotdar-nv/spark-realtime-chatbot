@@ -6,6 +6,440 @@ let waveformBars = [];
 let videoCallWaveformBars = [];
 let bottomWaveformBars = [];
 
+// ============================================================================
+// Microphone Device Selection & Test
+// ============================================================================
+const MIC_DEVICE_STORAGE_KEY = 'spark_mic_device_id';
+let micTestSession = null;
+
+function getSelectedMicId() {
+  try {
+    return localStorage.getItem(MIC_DEVICE_STORAGE_KEY) || '';
+  } catch (e) {
+    return '';
+  }
+}
+
+function setSelectedMicId(deviceId) {
+  try {
+    if (deviceId) {
+      localStorage.setItem(MIC_DEVICE_STORAGE_KEY, deviceId);
+    } else {
+      localStorage.removeItem(MIC_DEVICE_STORAGE_KEY);
+    }
+  } catch (e) {
+    // localStorage may be unavailable in private contexts
+  }
+}
+
+function getMicAudioConstraints(extra = {}) {
+  const constraints = {
+    channelCount: 1,
+    echoCancellation: true,
+    autoGainControl: true,
+    noiseSuppression: true,
+    ...extra
+  };
+  const selectedId = getSelectedMicId();
+  if (selectedId) constraints.deviceId = { exact: selectedId };
+  return constraints;
+}
+
+function isMicConstraintError(err) {
+  if (!err) return false;
+  const name = err.name || '';
+  const message = String(err.message || '').toLowerCase();
+  return name === 'OverconstrainedError'
+    || name === 'NotFoundError'
+    || name === 'DevicesNotFoundError'
+    || message.includes('constraint')
+    || message.includes('device not found')
+    || message.includes('requested device');
+}
+
+async function getMicStream(extra = {}) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error('Microphone API unavailable in this context');
+  }
+  const attempt = () => navigator.mediaDevices.getUserMedia({ audio: getMicAudioConstraints(extra) });
+  try {
+    return await attempt();
+  } catch (err) {
+    if (getSelectedMicId() && isMicConstraintError(err)) {
+      log(`Selected microphone unavailable (${err.name || 'constraint'}); falling back to system default.`);
+      setSelectedMicId('');
+      document.querySelectorAll('select[data-mic-select]').forEach((select) => {
+        select.value = '';
+      });
+      return attempt();
+    }
+    throw err;
+  }
+}
+
+async function enumerateMicInputs() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return [];
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices.filter((device) => device.kind === 'audioinput');
+}
+
+function renderMicDeviceOptions(inputs) {
+  const selected = getSelectedMicId();
+  document.querySelectorAll('select[data-mic-select]').forEach((select) => {
+    select.innerHTML = '';
+    const defaultOption = document.createElement('option');
+    defaultOption.value = '';
+    defaultOption.textContent = 'System default';
+    select.appendChild(defaultOption);
+
+    inputs.forEach((device, index) => {
+      if (!device.deviceId) return;
+      const option = document.createElement('option');
+      option.value = device.deviceId;
+      option.textContent = device.label || `Microphone ${index + 1}`;
+      select.appendChild(option);
+    });
+
+    const selectedAvailable = inputs.some((device) => device.deviceId === selected);
+    select.value = selectedAvailable ? selected : '';
+    select.onchange = (e) => onMicDeviceChanged(e.target.value);
+  });
+}
+
+async function refreshMicDeviceList(requestPermission = false) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+    renderMicDeviceOptions([]);
+    return;
+  }
+
+  let inputs = [];
+  try {
+    inputs = await enumerateMicInputs();
+  } catch (err) {
+    log(`Microphone enumeration notice: ${err.message}`);
+    renderMicDeviceOptions([]);
+    return;
+  }
+
+  const needsPermission = requestPermission && (inputs.length === 0 || inputs.some((device) => !device.label));
+  if (needsPermission) {
+    try {
+      const stream = await getMicStream();
+      stream.getTracks().forEach((track) => track.stop());
+      inputs = await enumerateMicInputs();
+    } catch (err) {
+      log(`Microphone permission notice: ${err.message}`);
+    }
+  }
+
+  const selected = getSelectedMicId();
+  const idsAvailable = inputs.some((device) => Boolean(device.deviceId));
+  let clearedSelection = false;
+  if (selected && idsAvailable && !inputs.some((device) => device.deviceId === selected)) {
+    setSelectedMicId('');
+    clearedSelection = true;
+    log('Selected microphone is no longer available; using system default.');
+  }
+
+  renderMicDeviceOptions(inputs);
+  if (clearedSelection) applyMicToActiveSessions();
+}
+
+function onMicDeviceChanged(deviceId) {
+  const nextId = deviceId || '';
+  setSelectedMicId(nextId);
+  document.querySelectorAll('select[data-mic-select]').forEach((select) => {
+    select.value = nextId;
+  });
+  stopMicTest();
+  log(nextId ? 'Microphone device updated.' : 'Using system default microphone.');
+  applyMicToActiveSessions();
+}
+
+async function withMicFallback(initFn) {
+  try {
+    return await initFn();
+  } catch (err) {
+    if (getSelectedMicId() && isMicConstraintError(err)) {
+      log(`Selected microphone unavailable (${err.name || 'constraint'}); falling back to system default.`);
+      setSelectedMicId('');
+      document.querySelectorAll('select[data-mic-select]').forEach((select) => {
+        select.value = '';
+      });
+      await refreshMicDeviceList(false);
+      return initFn();
+    }
+    throw err;
+  }
+}
+
+async function applyMicToActiveSessions() {
+  if (!voiceCallActive && !videoCallActive && !pttStream) return;
+
+  if (pttStream) {
+    cleanupPttAudio();
+    if (pttMode && videoCallActive) await initPttAudio();
+  }
+
+  if (voiceCallActive) {
+    if (vadInstance) {
+      try { vadInstance.pause(); vadInstance.destroy(); } catch (e) {}
+      vadInstance = null;
+    }
+    try {
+      await withMicFallback(() => createVoiceCallVad());
+      if (!isTtsPlaying) updateVoiceCallStatus('listening', voiceCallMuted ? 'Muted' : 'Listening...');
+    } catch (err) {
+      log(`Voice call mic switch notice: ${err.message}`);
+    }
+  }
+
+  if (videoCallActive) {
+    if (videoCallVadInstance) {
+      try { videoCallVadInstance.pause(); videoCallVadInstance.destroy(); } catch (e) {}
+      videoCallVadInstance = null;
+    }
+    try {
+      await withMicFallback(() => createVideoCallVad());
+      if (!isTtsPlaying) {
+        updateVideoCallStatus('listening', videoCallMuted ? 'Muted' : (pttMode ? 'Hold Space to talk' : 'Listening...'));
+      }
+    } catch (err) {
+      log(`Video call mic switch notice: ${err.message}`);
+    }
+  }
+}
+
+function setMicTestStatus(text) {
+  document.querySelectorAll('[data-mic-test-status]').forEach((el) => {
+    el.textContent = text;
+  });
+}
+
+function setMicTestLevel(ratio) {
+  const percent = Math.round(Math.max(0, Math.min(1, ratio)) * 100);
+  document.querySelectorAll('[data-mic-test-meter]').forEach((el) => {
+    const fill = el.querySelector('.mic-test-meter-fill');
+    if (fill) fill.style.width = `${percent}%`;
+  });
+}
+
+function setMicTestRunning(running) {
+  document.querySelectorAll('[data-mic-test-btn]').forEach((btn) => {
+    btn.classList.toggle('testing', running);
+    btn.innerHTML = `${window.SparkIcons.iconSvg(running ? 'square' : 'mic', 13)}<span>${running ? 'Stop test' : 'Test mic'}</span>`;
+  });
+}
+
+function cleanupMicTest(session) {
+  if (!session) return;
+  session.cancelled = true;
+  if (session.timer) {
+    clearTimeout(session.timer);
+    session.timer = null;
+  }
+  if (session.raf) {
+    cancelAnimationFrame(session.raf);
+    session.raf = null;
+  }
+  if (session.recorder && session.recorder.state !== 'inactive') {
+    try { session.recorder.stop(); } catch (e) {}
+  }
+  if (session.audioEl) {
+    try { session.audioEl.pause(); } catch (e) {}
+    session.audioEl = null;
+  }
+  if (session.url) {
+    try { URL.revokeObjectURL(session.url); } catch (e) {}
+    session.url = null;
+  }
+  if (session.stream) {
+    session.stream.getTracks().forEach((track) => track.stop());
+    session.stream = null;
+  }
+  if (session.ctx && session.ctx.state !== 'closed') {
+    try { session.ctx.close(); } catch (e) {}
+  }
+  session.ctx = null;
+  if (micTestSession === session) {
+    micTestSession = null;
+    setMicTestLevel(0);
+    setMicTestRunning(false);
+  }
+}
+
+function finishMicTestRecording(session) {
+  if (!session || session.cancelled) {
+    cleanupMicTest(session);
+    return;
+  }
+
+  session.phase = 'playing';
+  if (session.timer) {
+    clearTimeout(session.timer);
+    session.timer = null;
+  }
+  if (session.raf) {
+    cancelAnimationFrame(session.raf);
+    session.raf = null;
+  }
+  setMicTestLevel(0);
+  if (session.stream) {
+    session.stream.getTracks().forEach((track) => track.stop());
+    session.stream = null;
+  }
+  if (session.ctx) {
+    try { session.ctx.close(); } catch (e) {}
+    session.ctx = null;
+  }
+  setMicTestRunning(false);
+
+  if (!session.chunks.length) {
+    setMicTestStatus('No audio captured');
+    cleanupMicTest(session);
+    return;
+  }
+
+  const blob = new Blob(session.chunks, { type: session.chunks[0].type || 'audio/webm' });
+  const url = URL.createObjectURL(blob);
+  session.url = url;
+  setMicTestStatus('Playing back...');
+
+  const audio = new Audio(url);
+  session.audioEl = audio;
+  audio.onended = () => {
+    setMicTestStatus('Done');
+    setTimeout(() => {
+      if (micTestSession === session) cleanupMicTest(session);
+    }, 500);
+  };
+  audio.onerror = () => {
+    setMicTestStatus('Playback failed');
+    cleanupMicTest(session);
+  };
+  audio.play().catch((err) => {
+    setMicTestStatus('Playback failed');
+    log(`Mic test playback error: ${err.message}`);
+    cleanupMicTest(session);
+  });
+}
+
+function stopMicTest() {
+  const session = micTestSession;
+  if (!session) {
+    setMicTestLevel(0);
+    setMicTestRunning(false);
+    return;
+  }
+  session.cancelled = true;
+  if (session.recorder && session.recorder.state !== 'inactive') {
+    try { session.recorder.stop(); } catch (e) {}
+  }
+  cleanupMicTest(session);
+  setMicTestStatus('Ready');
+}
+
+async function testMicrophone() {
+  const existing = micTestSession;
+  if (existing) {
+    const wasRecording = existing.phase === 'recording';
+    stopMicTest();
+    if (wasRecording) return;
+  }
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setMicTestStatus('Microphone unavailable');
+    return;
+  }
+
+  const session = {
+    phase: 'starting',
+    cancelled: false,
+    stream: null,
+    ctx: null,
+    recorder: null,
+    chunks: [],
+    timer: null,
+    raf: null,
+    audioEl: null,
+    url: null
+  };
+  micTestSession = session;
+  setMicTestRunning(true);
+  setMicTestStatus('Listening...');
+
+  try {
+    const stream = await getMicStream();
+    if (session.cancelled) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    session.stream = stream;
+    session.phase = 'recording';
+
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) throw new Error('Web Audio API unavailable');
+    const ctx = new AudioCtx();
+    session.ctx = ctx;
+    if (ctx.state === 'suspended') {
+      try { await ctx.resume(); } catch (e) {}
+    }
+
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.6;
+    source.connect(analyser);
+    const samples = new Uint8Array(analyser.fftSize);
+
+    const tick = () => {
+      if (micTestSession !== session || session.cancelled) return;
+      analyser.getByteTimeDomainData(samples);
+      let sum = 0;
+      for (let i = 0; i < samples.length; i++) {
+        const value = (samples[i] - 128) / 128;
+        sum += value * value;
+      }
+      const rms = Math.sqrt(sum / samples.length);
+      setMicTestLevel(Math.min(1, rms * 4));
+      session.raf = requestAnimationFrame(tick);
+    };
+    tick();
+
+    const mimeType = window.MediaRecorder && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : '';
+    const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    session.recorder = recorder;
+    recorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) session.chunks.push(e.data);
+    };
+    recorder.onstop = () => finishMicTestRecording(session);
+    recorder.start();
+    session.timer = setTimeout(() => {
+      if (recorder.state !== 'inactive') {
+        try { recorder.stop(); } catch (e) {}
+      }
+    }, 3000);
+  } catch (err) {
+    setMicTestStatus('Microphone unavailable');
+    log(`Mic test error: ${err.message}`);
+    cleanupMicTest(session);
+  }
+}
+
+function initMicSettings() {
+  if (!navigator.mediaDevices) return;
+  refreshMicDeviceList(false);
+  if (navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener('devicechange', () => {
+      refreshMicDeviceList(false);
+    });
+  } else {
+    navigator.mediaDevices.ondevicechange = () => refreshMicDeviceList(false);
+  }
+}
+
 function calculateRmsEnergy(audioSamples) {
   if (!audioSamples || audioSamples.length === 0) return 0;
   let sumSquares = 0;
@@ -141,6 +575,7 @@ function createLocalVadConfig(callbacks) {
   return Object.assign({
     workletURL: '/static/vendor/vad.worklet.bundle.min.js',
     modelURL: '/static/vendor/silero_vad.onnx',
+    additionalAudioConstraints: getMicAudioConstraints(),
     positiveSpeechThreshold: vadSensitivityValue || 0.5,
     negativeSpeechThreshold: 0.35,
     redemptionFrames: 8,
@@ -152,6 +587,44 @@ function createLocalVadConfig(callbacks) {
 // ============================================================================
 // Voice Call Mode (VAD)
 // ============================================================================
+async function createVoiceCallVad() {
+  if (typeof vad === 'undefined') {
+    throw new Error('Local VAD bundle not available');
+  }
+  vadInstance = await vad.MicVAD.new(createLocalVadConfig({
+    onSpeechStart: () => {
+      if (voiceCallMuted) return;
+      if (isTtsPlaying && bargeInEnabled) {
+        stopTtsPlayback();
+      }
+      currentUserMsg = null;
+      isCurrentlySpeaking = true;
+      updateVoiceCallStatus('listening', 'Listening to speech...');
+    },
+    onSpeechEnd: (audio) => {
+      if (voiceCallMuted) return;
+      const energy = calculateRmsEnergy(audio);
+      updateEnergyMeter(energy);
+      const now = Date.now();
+      if (now - lastVadSendTime < VAD_DEBOUNCE_MS) return;
+      lastVadSendTime = now;
+
+      if (energy < energyThreshold) {
+        isCurrentlySpeaking = false;
+        updateVoiceCallStatus('listening', 'Listening...');
+        return;
+      }
+      isCurrentlySpeaking = false;
+      updateVoiceCallStatus('processing', 'Thinking...');
+      sendVoiceCallAudio(audio);
+    },
+    onVADMisfire: () => {
+      if (!isCurrentlySpeaking) updateVoiceCallStatus('listening', 'Listening...');
+    }
+  }));
+  vadInstance.start();
+}
+
 async function setupVoiceCallMode() {
   log('Setting up Voice Call mode with local Silero VAD...');
   const container = document.getElementById('voiceCallContainer');
@@ -160,42 +633,7 @@ async function setupVoiceCallMode() {
   startWaveformLoop();
 
   try {
-    if (typeof vad === 'undefined') {
-      throw new Error('Local VAD bundle not available');
-    }
-    vadInstance = await vad.MicVAD.new(createLocalVadConfig({
-      onSpeechStart: () => {
-        if (voiceCallMuted) return;
-        if (isTtsPlaying && bargeInEnabled) {
-          stopTtsPlayback();
-        }
-        currentUserMsg = null;
-        isCurrentlySpeaking = true;
-        updateVoiceCallStatus('listening', 'Listening to speech...');
-      },
-      onSpeechEnd: (audio) => {
-        if (voiceCallMuted) return;
-        const energy = calculateRmsEnergy(audio);
-        updateEnergyMeter(energy);
-        const now = Date.now();
-        if (now - lastVadSendTime < VAD_DEBOUNCE_MS) return;
-        lastVadSendTime = now;
-
-        if (energy < energyThreshold) {
-          isCurrentlySpeaking = false;
-          updateVoiceCallStatus('listening', 'Listening...');
-          return;
-        }
-        isCurrentlySpeaking = false;
-        updateVoiceCallStatus('processing', 'Thinking...');
-        sendVoiceCallAudio(audio);
-      },
-      onVADMisfire: () => {
-        if (!isCurrentlySpeaking) updateVoiceCallStatus('listening', 'Listening...');
-      }
-    }));
-
-    vadInstance.start();
+    await withMicFallback(() => createVoiceCallVad());
     voiceCallActive = true;
     updateVoiceCallStatus('listening', 'Listening...');
   } catch (error) {
@@ -266,6 +704,48 @@ function teardownVoiceCallMode() {
 // ============================================================================
 // Video Call Mode (Webcam + VAD/PTT + VLM)
 // ============================================================================
+async function createVideoCallVad() {
+  if (typeof vad === 'undefined') throw new Error('Local VAD bundle not loaded');
+  videoCallVadInstance = await vad.MicVAD.new(createLocalVadConfig({
+    onSpeechStart: () => {
+      if (videoCallMuted || pttMode) return;
+      if (videoCallProcessing || (isTtsPlaying && !bargeInEnabled)) return;
+      if (isTtsPlaying && bargeInEnabled) stopTtsPlayback();
+      currentUserMsg = null;
+      videoCallSpeaking = true;
+      updateVideoCallStatus('hearing', 'Listening...');
+    },
+    onSpeechEnd: (audio) => {
+      if (videoCallMuted || pttMode || videoCallProcessing || isTtsPlaying) return;
+      const energy = calculateRmsEnergy(audio);
+      updateEnergyMeter(energy);
+      const now = Date.now();
+      if (lastTtsEndTime > 0 && now - lastTtsEndTime < POST_TTS_COOLDOWN_MS) return;
+      if (now - lastVideoCallSendTime < VIDEO_CALL_DEBOUNCE_MS) return;
+      if (energy < energyThreshold) {
+        videoCallSpeaking = false;
+        updateVideoCallStatus('listening', 'Listening...');
+        return;
+      }
+      videoCallSpeaking = false;
+      videoCallProcessing = true;
+      updateVideoCallStatus('processing', 'Analyzing frame...');
+      sendVideoCallData(audio);
+    },
+    onVADMisfire: () => {
+      if (!videoCallSpeaking) updateVideoCallStatus('listening', 'Listening...');
+    }
+  }));
+
+  if (!pttMode) {
+    videoCallVadInstance.start();
+    updateVideoCallStatus('listening', 'Listening...');
+  } else {
+    videoCallVadInstance.pause();
+    updateVideoCallStatus('listening', 'Hold Space to talk');
+  }
+}
+
 async function setupVideoCallMode() {
   log('Setting up Video Call mode...');
   const workspaceBody = document.getElementById('workspaceBody');
@@ -295,45 +775,7 @@ async function setupVideoCallMode() {
   }
 
   try {
-    if (typeof vad === 'undefined') throw new Error('Local VAD bundle not loaded');
-    videoCallVadInstance = await vad.MicVAD.new(createLocalVadConfig({
-      onSpeechStart: () => {
-        if (videoCallMuted || pttMode) return;
-        if (videoCallProcessing || (isTtsPlaying && !bargeInEnabled)) return;
-        if (isTtsPlaying && bargeInEnabled) stopTtsPlayback();
-        currentUserMsg = null;
-        videoCallSpeaking = true;
-        updateVideoCallStatus('hearing', 'Listening...');
-      },
-      onSpeechEnd: (audio) => {
-        if (videoCallMuted || pttMode || videoCallProcessing || isTtsPlaying) return;
-        const energy = calculateRmsEnergy(audio);
-        updateEnergyMeter(energy);
-        const now = Date.now();
-        if (lastTtsEndTime > 0 && now - lastTtsEndTime < POST_TTS_COOLDOWN_MS) return;
-        if (now - lastVideoCallSendTime < VIDEO_CALL_DEBOUNCE_MS) return;
-        if (energy < energyThreshold) {
-          videoCallSpeaking = false;
-          updateVideoCallStatus('listening', 'Listening...');
-          return;
-        }
-        videoCallSpeaking = false;
-        videoCallProcessing = true;
-        updateVideoCallStatus('processing', 'Analyzing frame...');
-        sendVideoCallData(audio);
-      },
-      onVADMisfire: () => {
-        if (!videoCallSpeaking) updateVideoCallStatus('listening', 'Listening...');
-      }
-    }));
-
-    if (!pttMode) {
-      videoCallVadInstance.start();
-      updateVideoCallStatus('listening', 'Listening...');
-    } else {
-      videoCallVadInstance.pause();
-      updateVideoCallStatus('listening', 'Hold Space to talk');
-    }
+    await withMicFallback(() => createVideoCallVad());
     videoCallActive = true;
   } catch (error) {
     log(`Video VAD notice: ${error.message}`);
@@ -484,9 +926,7 @@ function setInputMode(mode) {
 async function initPttAudio() {
   try {
     if (pttStream) return;
-    pttStream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, sampleRate: 16000, echoCancellation: true, noiseSuppression: true }
-    });
+    pttStream = await getMicStream({ sampleRate: 16000 });
     pttAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
   } catch (err) {
     log(`PTT audio init notice: ${err.message}`);
@@ -605,9 +1045,7 @@ async function startRecording() {
   }
 
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 16000 }
-    });
+    const stream = await getMicStream({ sampleRate: 16000 });
     const codecs = ['audio/webm;codecs=opus', 'audio/webm;codecs=vorbis', 'audio/webm'];
     const selectedMimeType = codecs.find((c) => MediaRecorder.isTypeSupported(c));
     mediaRecorder = new MediaRecorder(stream, selectedMimeType ? { mimeType: selectedMimeType } : {});

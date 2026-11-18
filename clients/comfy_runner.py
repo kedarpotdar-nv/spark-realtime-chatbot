@@ -115,6 +115,7 @@ async def run_comfy_job(
             "job_id": job_id,
             "path": result.get("path"),
             "kind": kind,
+            "prompt": params.get("prompt") or params.get("tags") or "",
             "result": result,
         })
         return {"success": True, "job_id": job_id, **result}

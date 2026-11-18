@@ -129,7 +129,26 @@ function saveCurrentChat() {
   const messages = [];
   activeEl.querySelectorAll('.message').forEach((msgEl) => {
     if (msgEl.classList.contains('message-system') || msgEl.classList.contains('message-transient')) return;
+    if (msgEl.classList.contains('message-media-progress')) return;
     const role = msgEl.classList.contains('message-user') ? 'user' : 'assistant';
+
+    const mediaPath = msgEl.dataset.mediaPath;
+    if (mediaPath) {
+      const kind = msgEl.dataset.mediaKind || 'image';
+      const prompt = msgEl.dataset.mediaPrompt || '';
+      messages.push({
+        role,
+        content: prompt || (kind === 'music' ? 'Track ready' : 'Image ready'),
+        media: {
+          kind,
+          path: mediaPath,
+          prompt,
+          job_id: msgEl.dataset.jobId || ''
+        }
+      });
+      return;
+    }
+
     const contentEl = msgEl.querySelector('.message-content');
     const text = contentEl?.textContent?.trim();
     if (text) messages.push({ role, content: text });
@@ -189,8 +208,13 @@ function loadChat(chatId) {
   if (chat && Array.isArray(chat.messages) && chat.messages.length > 0) {
     conversationEl.innerHTML = '';
     chat.messages.forEach((m) => {
-      const el = createMessageElement(m.role, m.content);
-      conversationEl.appendChild(el.container);
+      if (m && m.media && m.media.path && typeof createMediaMessageElement === 'function') {
+        const mediaMsg = createMediaMessageElement(m.media);
+        conversationEl.appendChild(mediaMsg.container);
+      } else {
+        const el = createMessageElement(m.role, m.content);
+        conversationEl.appendChild(el.container);
+      }
     });
     scrollToBottom();
   } else {
@@ -305,10 +329,12 @@ function openChatModeModal() {
     modal.classList.add('active');
     modal.style.display = 'flex';
   }
+  refreshMicDeviceList(true);
   selectChatMode(selectedChatMode || 'call');
 }
 
 function closeChatModeModal() {
+  stopMicTest();
   const modal = document.getElementById('chatModeModal');
   if (modal) {
     modal.classList.remove('active');
@@ -340,6 +366,7 @@ function startSelectedChat() {
 // Settings & Prompts Modal
 function openSettingsModal() {
   refreshEnrolledFaces();
+  refreshMicDeviceList(true);
   const modal = document.getElementById('settingsModal');
   if (modal) {
     modal.classList.add('active');
@@ -348,6 +375,7 @@ function openSettingsModal() {
 }
 
 function closeSettingsModal() {
+  stopMicTest();
   const modal = document.getElementById('settingsModal');
   if (modal) {
     modal.classList.remove('active');
@@ -524,6 +552,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   initAllWaveforms();
   startWaveformLoop();
   setupKeyboardShortcuts();
+  initMicSettings();
 
   loadChatsFromStorage();
   const existingIds = Object.keys(chats);

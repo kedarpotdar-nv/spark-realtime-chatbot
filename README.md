@@ -264,7 +264,7 @@ Spark injects prompts, seeds, sizes, and durations by `_meta.title` on API workf
 
 ### Voice tools
 
-Enable in Settings → **generate_image**, **edit_image**, **generate_music**. Outputs land in `workspace/media/` and appear in the Hermes panel **Artifacts** tab (image preview + audio player). Progress events show under **Activity**.
+Enable in Settings → **generate_image**, **edit_image**, **generate_music**. Outputs land in `workspace/media/` and are rendered inline in the chat transcript (click images to open full size; music gets an inline player), as well as in the Hermes panel **Artifacts** tab. Progress events show under **Activity**.
 
 ### REST: `POST /api/media/generate` (Hermes / HTTP)
 
@@ -639,6 +639,7 @@ The web interface in `static/` is a three-pane console with zero external CDN de
   - Top status header displaying live state (**Idle**, **Listening**, **Thinking**, **Speaking**, **Agent Working**, **Error**), WebSocket connection status, RTT latency (`ms`), and Dark/Light theme toggle.
   - Voice Call and Video Call stage docks with live waveform bars, camera preview, and VAD/PTT turn detection controls.
   - Bottom control bar with push-to-talk (`Space` key or mic button), live 12-bar audio level + RMS energy gate meter, mode switcher (**Chat**, **Voice Call**, **Video Call**), Kokoro voice selector, and **Settings** modal.
+  - **Microphone picker**: choose and test a microphone in **Settings** or the **New Session** dialog before starting a call. The selected device is saved locally and applied to VAD and push-to-talk.
 - **Right Hermes Agent & Workspace Panel**:
   - **Activity Tab**: Direct task delegation bar, live Hermes task cards showing status (`queued`, `running`, `completed`, `failed`), tool call steps, streaming output/reasoning, and task cancellation.
   - **Artifacts Tab**: Real-time index of files generated in `workspace/` with one-click source inspection and live rendered Markdown or sandboxed HTML preview.

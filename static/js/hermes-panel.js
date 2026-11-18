@@ -52,20 +52,246 @@ function switchAgentTab(tab) {
   if (viewArtifacts) viewArtifacts.style.display = tab === 'artifacts' ? 'flex' : 'none';
 }
 
+const MEDIA_KIND_LABELS = { image: 'Image', edit: 'Edit', music: 'Music' };
+
+function normalizeMediaKind(kind, path) {
+  const k = String(kind || '').toLowerCase();
+  if (k === 'music' || k === 'audio') return 'music';
+  if (k === 'image' || k === 'edit') return k;
+  if (/\.(mp3|wav|flac|ogg)$/i.test(path || '')) return 'music';
+  return 'image';
+}
+
+function mediaUrlForPath(path) {
+  return `/workspace/${String(path || '').split('/').map(encodeURIComponent).join('/')}`;
+}
+
+function findChatMediaElement(jobId) {
+  if (!jobId) return null;
+  const activeEl = getActiveConversationEl();
+  if (!activeEl) return null;
+  return Array.from(activeEl.querySelectorAll('[data-job-id]'))
+    .find((el) => el.dataset.jobId === jobId) || null;
+}
+
+function insertChatElement(el) {
+  removeEmptyState();
+  const activeEl = getActiveConversationEl();
+  if (!activeEl || !el) return;
+  activeEl.appendChild(el);
+  scrollToBottom();
+}
+
+function createMediaMessageElement(media) {
+  const kind = normalizeMediaKind(media.kind, media.path);
+  const path = media.path || '';
+  const prompt = media.prompt || '';
+  const jobId = media.job_id || '';
+  const container = document.createElement('div');
+  container.className = 'message message-assistant message-media';
+  if (jobId) container.dataset.jobId = jobId;
+  container.dataset.mediaKind = kind;
+  container.dataset.mediaPath = path;
+  container.dataset.mediaPrompt = prompt;
+
+  const header = document.createElement('div');
+  header.className = 'message-header';
+  const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  header.innerHTML = `<span>Spark</span><span>${escapeHtml(timeStr)}</span>`;
+
+  const content = document.createElement('div');
+  content.className = 'message-content';
+
+  const meta = document.createElement('div');
+  meta.className = 'message-media-meta';
+  meta.innerHTML = `${window.SparkIcons.iconSvg(kind === 'music' ? 'music' : 'image', 13)}<span>${escapeHtml(MEDIA_KIND_LABELS[kind] || 'Media')}</span>`;
+  content.appendChild(meta);
+
+  const url = mediaUrlForPath(path);
+  if (kind === 'music' && path) {
+    const audioWrap = document.createElement('div');
+    audioWrap.className = 'message-media-audio';
+    audioWrap.innerHTML = buildArtifactAudioPlayer(url);
+    content.appendChild(audioWrap);
+  } else if (path) {
+    const imageBtn = document.createElement('button');
+    imageBtn.type = 'button';
+    imageBtn.className = 'message-media-image-btn';
+    imageBtn.title = 'Open full size';
+    imageBtn.setAttribute('aria-label', 'Open generated image full size');
+    const img = document.createElement('img');
+    img.className = 'message-media-image';
+    img.loading = 'lazy';
+    img.alt = prompt || MEDIA_KIND_LABELS[kind] || 'Generated media';
+    img.src = url;
+    imageBtn.appendChild(img);
+    imageBtn.addEventListener('click', () => openMediaLightbox(path));
+    content.appendChild(imageBtn);
+  }
+
+  const caption = document.createElement('div');
+  caption.className = 'message-media-caption';
+  caption.textContent = prompt || (kind === 'music' ? 'Track ready' : 'Image ready');
+  content.appendChild(caption);
+
+  container.appendChild(header);
+  container.appendChild(content);
+  return { container, content };
+}
+
+function createMediaProgressElement(job) {
+  const kind = normalizeMediaKind(job.kind, job.artifact);
+  const container = document.createElement('div');
+  container.className = 'message message-assistant message-media-progress';
+  container.dataset.jobId = job.job_id || '';
+  container.dataset.mediaKind = kind;
+
+  const header = document.createElement('div');
+  header.className = 'message-header';
+  const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  header.innerHTML = `<span>Spark</span><span>${escapeHtml(timeStr)}</span>`;
+
+  const content = document.createElement('div');
+  content.className = 'message-content';
+  content.innerHTML = `
+    <div class="message-media-meta">
+      ${window.SparkIcons.iconSvg(kind === 'music' ? 'music' : 'image', 13)}
+      <span>${escapeHtml(MEDIA_KIND_LABELS[kind] || 'Media')}</span>
+      <span class="message-media-progress-percent">0%</span>
+    </div>
+    <div class="message-media-caption"></div>
+    <div class="message-media-progress-track"><span class="message-media-progress-fill"></span></div>
+  `;
+  const captionEl = content.querySelector('.message-media-caption');
+  if (captionEl) captionEl.textContent = job.label || (kind === 'music' ? 'Composing track...' : 'Rendering image...');
+
+  container.appendChild(header);
+  container.appendChild(content);
+  updateMediaProgressElement(container, job);
+  return { container, content };
+}
+
+function updateMediaProgressElement(el, job) {
+  if (!el) return;
+  const rawPercent = job.progress ? Number(job.progress.percent) : 0;
+  const percent = Number.isFinite(rawPercent) ? Math.max(0, Math.min(100, rawPercent)) : 0;
+  const fill = el.querySelector('.message-media-progress-fill');
+  if (fill) fill.style.width = `${percent}%`;
+  const percentEl = el.querySelector('.message-media-progress-percent');
+  if (percentEl) percentEl.textContent = `${Math.round(percent)}%`;
+  const captionEl = el.querySelector('.message-media-caption');
+  if (captionEl && job.label) captionEl.textContent = job.label;
+}
+
+function createMediaErrorElement(job) {
+  const kind = normalizeMediaKind(job.kind, job.artifact);
+  const container = document.createElement('div');
+  container.className = 'message message-assistant message-media-error';
+  container.dataset.jobId = job.job_id || '';
+  container.dataset.mediaKind = kind;
+
+  const header = document.createElement('div');
+  header.className = 'message-header';
+  const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  header.innerHTML = `<span>Spark</span><span>${escapeHtml(timeStr)}</span>`;
+
+  const content = document.createElement('div');
+  content.className = 'message-content';
+  content.innerHTML = `
+    <div class="message-media-error-text">
+      ${window.SparkIcons.iconSvg('alert-circle', 14)}
+      <span></span>
+    </div>
+  `;
+  const textEl = content.querySelector('.message-media-error-text span');
+  if (textEl) textEl.textContent = job.error || job.summary || 'Media generation failed.';
+
+  container.appendChild(header);
+  container.appendChild(content);
+  return { container, content };
+}
+
+function replaceChatElement(existing, nextEl) {
+  if (!nextEl) return;
+  if (existing && existing.parentNode) {
+    existing.replaceWith(nextEl);
+  } else {
+    insertChatElement(nextEl);
+  }
+  scrollToBottom();
+}
+
+function finalizeChatMedia(job, info = {}) {
+  const path = info.path || job.artifact || job.path || job.result?.path;
+  if (!path) return;
+  const kind = normalizeMediaKind(info.kind || job.kind, path);
+  const prompt = info.prompt || job.label || job.result?.prompt || job.result?.tags || job.summary || '';
+  const media = { kind, path, prompt, job_id: job.job_id || '' };
+  const existing = findChatMediaElement(job.job_id);
+
+  if (existing && existing.classList.contains('message-media') && existing.dataset.mediaPath === path) {
+    return;
+  }
+
+  const next = createMediaMessageElement(media);
+  replaceChatElement(existing, next.container);
+  if (typeof saveCurrentChat === 'function') saveCurrentChat();
+}
+
+function updateChatMediaProgress(job) {
+  if (!job || !job.job_id) return;
+  const path = job.artifact || job.path || job.result?.path;
+  const failed = job.status === 'failed' || (job.error && !path);
+  const existing = findChatMediaElement(job.job_id);
+
+  if (failed) {
+    const next = createMediaErrorElement(job);
+    replaceChatElement(existing, next.container);
+    if (typeof saveCurrentChat === 'function') saveCurrentChat();
+    return;
+  }
+
+  if (path && job.status === 'completed') {
+    finalizeChatMedia(job);
+    return;
+  }
+
+  if (!existing) {
+    const next = createMediaProgressElement(job);
+    insertChatElement(next.container);
+  } else if (existing.classList.contains('message-media-progress')) {
+    updateMediaProgressElement(existing, job);
+    scrollToBottom();
+  }
+}
+
 function handleComfyProgress(payload) {
   if (!payload || !payload.job_id) return;
   comfyJobs[payload.job_id] = { ...comfyJobs[payload.job_id], ...payload };
   setSystemState('agent_working', 'ComfyUI');
   renderHermesPanel();
+  updateChatMediaProgress(comfyJobs[payload.job_id]);
 }
 
 function handleMediaReady(payload) {
   if (!payload) return;
-  if (payload.job_id && comfyJobs[payload.job_id]) {
-    comfyJobs[payload.job_id] = { ...comfyJobs[payload.job_id], ...payload, status: payload.success === false ? 'failed' : 'completed' };
+  const jobId = payload.job_id || '';
+  const job = jobId
+    ? (comfyJobs[jobId] = { ...comfyJobs[jobId], ...payload })
+    : { ...payload };
+
+  if (payload.success === false) {
+    job.status = 'failed';
+    job.error = payload.error || payload.summary || job.error || 'Media generation failed.';
+  } else {
+    job.status = 'completed';
+    if (payload.path && !job.artifact) job.artifact = payload.path;
   }
+
   if (!isTtsPlaying) setSystemState('idle');
   renderHermesPanel();
+
+  if (jobId) updateChatMediaProgress(job);
 }
 
 function handleHermesEvent(payload) {
